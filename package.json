@@ -8,6 +8,11 @@
     "watch": "rbxtsc -w",
     "prepublishOnly": "npm run build"
   },
+  "homepage": "https://github.com/BazirGames/Remote",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BazirGames/Remote.git"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
