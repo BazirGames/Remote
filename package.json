@@ -1,6 +1,6 @@
 {
   "name": "@bazir/remote",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.9",
   "description": "",
   "main": "out/init.lua",
   "scripts": {
@@ -19,13 +19,15 @@
   "types": "out/index.d.ts",
   "files": [
     "out",
-    "!**/*.tsbuildinfo"
+    "!**/*.tsbuildinfo",
+    "!**/*.spec.ts"
   ],
   "publishConfig": {
     "access": "public"
   },
   "devDependencies": {
     "@rbxts/compiler-types": "^1.3.3-types.0",
+    "@rbxts/testez": "^0.3.1-ts.7",
     "@rbxts/types": "^1.0.571",
     "@typescript-eslint/eslint-plugin": "^5.16.0",
     "@typescript-eslint/parser": "^5.16.0",

@@ -2,17 +2,23 @@ class Signal<ConnectedFunctionSignature extends (...args: any) => any = (...args
 	public static Is(object: unknown): object is Signal {
 		return typeIs(object, "table") && getmetatable(object) === Signal;
 	}
+
 	private Bindable = new Instance("BindableEvent");
-	Connect(callback: ConnectedFunctionSignature): RBXScriptConnection {
-		return this.Bindable.Event.Connect(callback);
+	public Connect(callback: ConnectedFunctionSignature): RBXScriptConnection {
+		return this.Bindable.Event.Connect((c: () => LuaTuple<Parameters<ConnectedFunctionSignature>>) =>
+			callback(c()),
+		);
 	}
-	Fire(...args: Parameters<ConnectedFunctionSignature>) {
-		return this.Bindable.Fire(...(args as unknown[]));
+	/** @hidden */
+	public Fire(...args: Parameters<ConnectedFunctionSignature>) {
+		return this.Bindable.Fire(() => args as LuaTuple<[Parameters<ConnectedFunctionSignature>]>);
 	}
-	Wait(): LuaTuple<Parameters<ConnectedFunctionSignature>> {
-		return this.Bindable.Event.Wait() as LuaTuple<Parameters<ConnectedFunctionSignature>>;
+	public Wait(): LuaTuple<Parameters<ConnectedFunctionSignature>> {
+		return (this.Bindable.Event.Wait() as unknown as () => unknown)() as LuaTuple<
+			Parameters<ConnectedFunctionSignature>
+		>;
 	}
-	Destroy() {
+	public Destroy() {
 		this.Bindable.Destroy();
 	}
 }

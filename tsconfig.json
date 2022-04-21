@@ -1,4 +1,7 @@
 {
+	"exclude": [
+		"tests"
+	],
 	"compilerOptions": {
 		// required
 		"allowSyntheticDefaultImports": true,
