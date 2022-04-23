@@ -361,8 +361,8 @@ export class BazirRemote {
 		);
 	}
 	/** @hidden */
-	public _GetorCreateRemote(): typeof BazirRemote.prototype.RemoteEvent {
-		return this._getRemote(isServer ? 0 : undefined) ?? this._createRemote();
+	public _GetorCreateRemote(parent?: Instance): typeof BazirRemote.prototype.RemoteEvent {
+		return this._getRemote(isServer ? 0 : undefined) ?? this._createRemote(parent);
 	}
 	/** @hidden */
 	public _updateremoteparent(parent: Instance) {
@@ -422,7 +422,7 @@ export class BazirRemote {
 	public _addChildRemote(child: Remotes): void {
 		const CurrentData = BazirRemotes.get(this);
 		if (BazirRemote.Is(CurrentData?.LastParent) || BazirRemoteContainer.Is(CurrentData?.LastParent)) {
-			CurrentData?.LastParent._removeChildRemote(child);
+			CurrentData.LastParent._removeChildRemote(child);
 		}
 		child._updateremoteparent(this.RemoteEvent);
 		if (isServer) {
@@ -488,10 +488,11 @@ export class BazirRemote {
 			BazirRemotes.delete(this);
 		}
 		this.Janitor.Destroy();
-		table.clear(this);
-		setmetatable<BazirRemote>(this, undefined as unknown as LuaMetatable<BazirRemote>);
+		//table.clear(this);
+		//setmetatable<BazirRemote>(this, undefined as unknown as LuaMetatable<BazirRemote>);
 	}
 	constructor(public Path: string, Parent: RemoteParent = script) {
+		BazirRemote.AssertParent(parent);
 		const mt = getmetatable(this) as LuaMetatable<BazirRemote>;
 		mt.__newindex = (remote, index, value) => {
 			warn(`[BazirRemote] ${this.Path} can't set ${index}`);
@@ -528,8 +529,8 @@ export class BazirRemote {
 		assert(typeIs(Path, "string"), `expects string, got ${type(Path)}`);
 		assert(Path.size() > 0, "path can't be empty");
 		assert(Path.size() < 256, "path can't be longer than 255 characters");
+		this.RemoteEvent = this._GetorCreateRemote(Parent);
 		this._changeparent(Parent);
-		this.RemoteEvent = this._GetorCreateRemote();
 		assert(this.RemoteEvent !== undefined, "failed to create remote event");
 		if (isServer) {
 			this.Janitor.Add(
