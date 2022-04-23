@@ -63,6 +63,7 @@ const YieldQueue: { [K: string]: thread | undefined } = {};
 const BazirRemotes = new Map<
 	RemoteParent,
 	{
+		LastParent?: RemoteParent;
 		Parent?: RemoteParent;
 		Children: Array<Remotes>;
 	}
@@ -137,10 +138,10 @@ export class BazirRemote {
 	public OnClientEvent = this.Janitor.Add(new Signal<(...args: unknown[]) => void>());
 	public ChildAdded = this.Janitor.Add(new Signal<(Child: BazirRemote) => void>());
 	public ChildRemoved = this.Janitor.Add(new Signal<(Child: BazirRemote) => void>());
-	public RemoteEvent!: RemoteEvent<
+	private RemoteEvent!: RemoteEvent<
 		(Request: typeof RequestTypes[keyof typeof RequestTypes], uuid: string, ...args: unknown[]) => void
 	>;
-	/* public Parent?: RemoteParent; */
+	public Parent!: RemoteParent;
 	public InvokeClient<T>(player: Player, ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
 		const uuid = HttpService.GenerateGUID(false);
@@ -330,17 +331,19 @@ export class BazirRemote {
 	}
 	/** @hidden */
 	public _getRemoteParent(): Instance {
-		return typeIs(this.Parent, "Instance") ? this.Parent : this.Parent!.RemoteEvent;
+		return typeIs(this.Parent, "Instance") ? this.Parent : this.Parent!._GetorCreateRemote();
 	}
 	/** @hidden */
 	public _createRemote(parent = this._getRemoteParent()): typeof BazirRemote.prototype.RemoteEvent {
 		assert(isServer, "can only be called from the server");
-		let RemoteEvent = parent.FindFirstChild(this.Path) as typeof BazirRemote.prototype.RemoteEvent;
+		let RemoteEvent =
+			this.RemoteEvent ?? (parent.FindFirstChild(this.Path) as typeof BazirRemote.prototype.RemoteEvent);
 		if (isServer && !RemoteEvent) {
 			RemoteEvent = this.Janitor.Add(new Instance("RemoteEvent"));
 			RemoteEvent.Name = this.Path;
 			RemoteEvent.Parent = parent;
 		}
+		this.RemoteEvent = RemoteEvent;
 		return RemoteEvent;
 	}
 	/** @hidden */
@@ -363,6 +366,7 @@ export class BazirRemote {
 	}
 	/** @hidden */
 	public _updateremoteparent(parent: Instance) {
+		print("_updateremoteparent", parent);
 		const RemoteEvent = this._GetorCreateRemote();
 		if (isServer) {
 			RemoteEvent.Parent = parent;
@@ -370,6 +374,7 @@ export class BazirRemote {
 	}
 	/** @hidden */
 	public _changeparent(parent: unknown) {
+		print("_changeparent", parent);
 		BazirRemote.AssertParent(parent);
 		const CurrentData =
 			BazirRemotes.get(this) ??
@@ -386,6 +391,7 @@ export class BazirRemote {
 			}).get(parent)!;
 		assert(ParentData.Children.find((i) => i.Path === this.Path) === undefined, "this path is already created");
 		ParentData.Children.push(this);
+		CurrentData.LastParent = CurrentData.Parent;
 		CurrentData.Parent = parent;
 		rawset(this, "Parent", parent);
 		if (BazirRemote.Is(parent) || BazirRemoteContainer.Is(parent)) {
@@ -414,9 +420,9 @@ export class BazirRemote {
 	}
 	/** @hidden */
 	public _addChildRemote(child: Remotes): void {
-		const lastparent = BazirRemotes.get(this)?.Parent;
-		if (BazirRemote.Is(lastparent) || BazirRemoteContainer.Is(lastparent)) {
-			lastparent._removeChildRemote(child);
+		const CurrentData = BazirRemotes.get(this);
+		if (BazirRemote.Is(CurrentData?.LastParent) || BazirRemoteContainer.Is(CurrentData?.LastParent)) {
+			CurrentData?.LastParent._removeChildRemote(child);
 		}
 		child._updateremoteparent(this.RemoteEvent);
 		if (isServer) {
@@ -434,16 +440,6 @@ export class BazirRemote {
 			);
 		}
 		this.ChildAdded.Fire(child);
-	}
-	public Destroy() {
-		const CurrentData = BazirRemotes.get(this);
-		BazirRemotes.delete(this);
-		if (CurrentData?.Parent) {
-			if (IsRemote(CurrentData.Parent)) {
-				CurrentData.Parent._removeChildRemote(this);
-			}
-		}
-		this.Janitor.Destroy();
 	}
 	private _removeChild(RemoteType: RemoteNameType, Path: string) {
 		const CurrentData = BazirRemotes.get(this);
@@ -469,10 +465,70 @@ export class BazirRemote {
 				break;
 		}
 	}
-	constructor(public Path: string, public Parent: RemoteParent = script) {
+	public Destroy() {
+		const CurrentData = BazirRemotes.get(this);
+		if (CurrentData) {
+			if (CurrentData?.Parent) {
+				const ParrentData = BazirRemotes.get(CurrentData.Parent);
+				if (IsRemote(CurrentData.Parent)) {
+					CurrentData.Parent._removeChildRemote(this);
+				}
+				if (ParrentData) {
+					ParrentData.Children.remove(ParrentData.Children.indexOf(this));
+					if (typeIs(CurrentData.Parent, "Instance") && ParrentData.Children.size() === 0) {
+						BazirRemotes.delete(CurrentData.Parent);
+					}
+				}
+				CurrentData.Parent = undefined;
+			}
+			CurrentData.Children.forEach((child) => {
+				child.Destroy();
+			});
+			CurrentData.Children.clear();
+			BazirRemotes.delete(this);
+		}
+		this.Janitor.Destroy();
+		table.clear(this);
+		setmetatable<BazirRemote>(this, undefined as unknown as LuaMetatable<BazirRemote>);
+	}
+	constructor(public Path: string, Parent: RemoteParent = script) {
+		const mt = getmetatable(this) as LuaMetatable<BazirRemote>;
+		mt.__newindex = (remote, index, value) => {
+			warn(`[BazirRemote] ${this.Path} can't set ${index}`);
+			print(index, value, debug.traceback());
+			switch (index) {
+				case "RemoteEvent": {
+					assert(remote[index] === undefined, "Cannot change remote event");
+					rawset(remote, index, value);
+					break;
+				}
+				case "Parent": {
+					remote._changeparent(value);
+					break;
+				}
+				case "OnServerInvoke": {
+					/* assert(remote[index] === undefined, "Cannot change on server invoke"); */
+					assert(typeOf(value) === "function", "On server invoke must be function");
+					assert(isServer, "On server invoke can be set only on server");
+					rawset(remote, index, value);
+					break;
+				}
+				case "OnClientInvoke": {
+					/* assert(remote[index] === undefined, "Cannot change on client invoke"); */
+					assert(typeOf(value) === "function", "On client invoke must be function");
+					assert(!isServer, "On client invoke can be set only on client");
+					rawset(remote, index, value);
+					break;
+				}
+				default:
+					assert(rawget(mt, BRType.Loaded) !== true, "(cannot modify readonly [BazirRemote])");
+					rawset(remote, index, value);
+			}
+		};
 		assert(typeIs(Path, "string"), `expects string, got ${type(Path)}`);
 		assert(Path.size() > 0, "path can't be empty");
 		assert(Path.size() < 256, "path can't be longer than 255 characters");
+		this._changeparent(Parent);
 		this.RemoteEvent = this._GetorCreateRemote();
 		assert(this.RemoteEvent !== undefined, "failed to create remote event");
 		if (isServer) {
@@ -671,45 +727,6 @@ export class BazirRemote {
 			]).await();
 		}
 		rawset(this, BRType.Loaded, true);
-		const mt = getmetatable(this) as LuaMetatable<BazirRemote>;
-		mt.__newindex = (remote, index, value) => {
-			switch (index) {
-				case "RemoteEvent": {
-					assert(remote[index] === undefined, "Cannot change remote event");
-					rawset(remote, index, value);
-					break;
-				}
-				case "_parent": {
-					rawset(remote, index, value);
-					break;
-				}
-				case "Parent": {
-					const parent = remote[index];
-					if (parent === value) {
-						return;
-					}
-					remote._changeparent(value);
-					break;
-				}
-				case "OnServerInvoke": {
-					/* assert(remote[index] === undefined, "Cannot change on server invoke"); */
-					assert(typeOf(value) === "function", "On server invoke must be function");
-					assert(isServer, "On server invoke can be set only on server");
-					rawset(remote, index, value);
-					break;
-				}
-				case "OnClientInvoke": {
-					/* assert(remote[index] === undefined, "Cannot change on client invoke"); */
-					assert(typeOf(value) === "function", "On client invoke must be function");
-					assert(!isServer, "On client invoke can be set only on client");
-					rawset(remote, index, value);
-					break;
-				}
-				default:
-					assert(rawget(mt, BRType.Loaded) !== true, "(cannot modify readonly [BazirRemote])");
-					rawset(remote, index, value);
-			}
-		};
 	}
 }
 export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRemote {
