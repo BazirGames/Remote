@@ -1,30 +1,42 @@
 import { Janitor } from "@rbxts/janitor";
-import Signal from "./Signal";
-import Compression from "./Compression";
+import SignalType from "./Signal";
+import type CompressionType from "./Compression";
+/* import type PromiseType from "./GetPromiseLibrary";
+
+const Promise = require(script.FindFirstChild("GetPromiseLibrary") as ModuleScript) as typeof PromiseType; */
+const Signal = require(script.FindFirstChild("Signal") as ModuleScript) as typeof SignalType;
+const Compression = require(script.FindFirstChild("Compression") as ModuleScript) as typeof CompressionType;
+
+function async<T extends Callback>(f: T): T {
+	// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+	// @ts-ignore
+	return Promise.promisify(f);
+}
 
 const LogSettings = {
 	LogEnabled: false,
 	LogAdvancedEnabled: false,
 };
+
 const Log = {
-	Info: async (message: string, ...optionalParams: unknown[]) => {
+	Info: async((message: string, ...optionalParams: unknown[]) => {
 		if (LogSettings.LogEnabled) {
 			print(message, optionalParams);
 		}
-	},
-	Error: async (message: string, ...optionalParams: unknown[]) => {
+	}),
+	Error: async((message: string, ...optionalParams: unknown[]) => {
 		if (LogSettings.LogEnabled) {
 			print(message, optionalParams);
 		}
-	},
-	Debug: async (message: string, ...optionalParams: unknown[]) => {
+	}),
+	Debug: async((message: string, ...optionalParams: unknown[]) => {
 		if (LogSettings.LogAdvancedEnabled) {
 			print(message, optionalParams);
 		}
-	},
-	Warn: async (message: string, ...optionalParams: unknown[]) => {
+	}),
+	Warn: async((message: string, ...optionalParams: unknown[]) => {
 		warn(message, optionalParams);
-	},
+	}),
 };
 
 const Settings = {
@@ -128,7 +140,7 @@ export class BazirRemote {
 	}
 	public static AssertParent(value: unknown): asserts value is RemoteParent {
 		assert(
-			BazirRemote.Is(value) || BazirRemoteContainer.Is(value) || typeIs(value, "Instance"),
+			IsRemote(value) || typeIs(value, "Instance"),
 			"parent must be a Instance, BazirRemote or BazirRemoteContainer",
 		);
 	}
@@ -144,6 +156,7 @@ export class BazirRemote {
 	public Parent!: RemoteParent;
 	public InvokeClient<T>(player: Player, ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
+		assert(typeIs(player, "Instance") && player.IsA("Player"), "player must be a Player");
 		const uuid = HttpService.GenerateGUID(false);
 		const returnPromise = new Promise<T>((resolve, reject) => {
 			YieldQueue[uuid] = coroutine.running();
@@ -207,7 +220,7 @@ export class BazirRemote {
 				resolve(
 					this.GetChildren().map((child) => {
 						return {
-							RemoteType: BazirRemote.Is(child) ? "BazirRemote" : "BazirRemoteContainer",
+							RemoteType: GetRemoteType(child),
 							Path: child.Path,
 						};
 					}),
@@ -273,6 +286,8 @@ export class BazirRemote {
 	}
 	public FireAllClientsWithinDistance(position: Vector3, distance: number, ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
+		assert(typeIs(position, "Vector3"), "expected Vector3 got %s".format(typeOf(position)));
+		assert(typeIs(distance, "number"), "expected number got %s".format(typeOf(distance)));
 		return this.FireClients(
 			Players.GetPlayers().filter((player) => {
 				return (
@@ -291,6 +306,9 @@ export class BazirRemote {
 		...args: unknown[]
 	) {
 		assert(isServer, "can only be called from the server");
+		assert(typeOf(ignoreclient) === "table", "expected table got %s".format(typeOf(ignoreclient)));
+		assert(typeIs(position, "Vector3"), "expected Vector3 got %s".format(typeOf(position)));
+		assert(typeIs(distance, "number"), "expected number got %s".format(typeOf(distance)));
 		return this.FireClients(
 			Players.GetPlayers().filter((player) => {
 				return (
@@ -330,14 +348,17 @@ export class BazirRemote {
 		return this.Tags as unknown as T;
 	}
 	/** @hidden */
-	public _getRemoteParent(): Instance {
-		return typeIs(this.Parent, "Instance") ? this.Parent : this.Parent!._GetorCreateRemote();
+	public _getRemoteParent(Parent = this.Parent): Instance {
+		const RemoteParent = typeIs(Parent, "Instance") ? Parent : Parent!._GetorCreateRemote();
+		print("_getRemoteParent", RemoteParent);
+		return RemoteParent;
 	}
 	/** @hidden */
 	public _createRemote(parent = this._getRemoteParent()): typeof BazirRemote.prototype.RemoteEvent {
-		assert(isServer, "can only be called from the server");
-		let RemoteEvent =
-			this.RemoteEvent ?? (parent.FindFirstChild(this.Path) as typeof BazirRemote.prototype.RemoteEvent);
+		if (this.RemoteEvent) {
+			return this.RemoteEvent;
+		}
+		let RemoteEvent = parent.FindFirstChild(this.Path) as typeof BazirRemote.prototype.RemoteEvent;
 		if (isServer && !RemoteEvent) {
 			RemoteEvent = this.Janitor.Add(new Instance("RemoteEvent"));
 			RemoteEvent.Name = this.Path;
@@ -349,23 +370,29 @@ export class BazirRemote {
 	/** @hidden */
 	public _getRemote(
 		timeout = (Settings.Clienttimeout + Settings.Servertimeout) / 2,
+		parent = this._getRemoteParent(),
 	): typeof BazirRemote.prototype.RemoteEvent | undefined {
-		const ParentRemoteEvent = this._getRemoteParent();
-		const FoundRemote = ParentRemoteEvent?.FindFirstChild(this.Path) as RemoteEvent | undefined;
+		if (this.RemoteEvent) {
+			return this.RemoteEvent;
+		}
+		const FoundRemote = parent?.FindFirstChild(this.Path) as RemoteEvent | undefined;
 		return (
-			this.RemoteEvent ??
 			FoundRemote ??
 			((timeout <= 0
 				? FoundRemote
-				: ParentRemoteEvent?.WaitForChild(this.Path, timeout)) as typeof BazirRemote.prototype.RemoteEvent)
+				: parent?.WaitForChild(this.Path, timeout)) as typeof BazirRemote.prototype.RemoteEvent)
 		);
 	}
 	/** @hidden */
-	public _GetorCreateRemote(parent?: Instance): typeof BazirRemote.prototype.RemoteEvent {
-		return this._getRemote(isServer ? 0 : undefined) ?? this._createRemote(parent);
+	public _GetorCreateRemote(parent?: RemoteParent): typeof BazirRemote.prototype.RemoteEvent {
+		return (
+			this._getRemote(isServer ? 0 : undefined, this._getRemoteParent(parent)) ??
+			this._createRemote(this._getRemoteParent(parent))
+		);
 	}
 	/** @hidden */
 	public _updateremoteparent(parent: Instance) {
+		assert(typeIs(parent, "Instance"), "expected Instance got %s".format(typeOf(parent)));
 		print("_updateremoteparent", parent);
 		const RemoteEvent = this._GetorCreateRemote();
 		if (isServer) {
@@ -373,27 +400,32 @@ export class BazirRemote {
 		}
 	}
 	/** @hidden */
-	public _changeparent(parent: unknown) {
-		print("_changeparent", parent);
+	public _checkparent(parent: unknown): asserts parent is RemoteParent {
 		BazirRemote.AssertParent(parent);
+		const ParentData = BazirRemotes.get(parent);
+		assert(ParentData?.Children.find((i) => i.Path === this.Path) === undefined, "this path is already created");
+	}
+	/** @hidden */
+	public _setparent(parent: unknown): asserts parent is RemoteParent {
+		this._checkparent(parent);
 		const CurrentData =
 			BazirRemotes.get(this) ??
 			BazirRemotes.set(this, {
 				Children: [],
 			}).get(this)!;
-		if (CurrentData?.Parent === parent) {
-			return;
-		}
 		const ParentData =
 			BazirRemotes.get(parent) ??
 			BazirRemotes.set(parent, {
 				Children: [],
 			}).get(parent)!;
-		assert(ParentData.Children.find((i) => i.Path === this.Path) === undefined, "this path is already created");
 		ParentData.Children.push(this);
 		CurrentData.LastParent = CurrentData.Parent;
 		CurrentData.Parent = parent;
 		rawset(this, "Parent", parent);
+	}
+	/** @hidden */
+	public _changeparent(parent: unknown) {
+		this._setparent(parent);
 		if (BazirRemote.Is(parent) || BazirRemoteContainer.Is(parent)) {
 			parent._addChildRemote(this);
 			return;
@@ -421,8 +453,9 @@ export class BazirRemote {
 	/** @hidden */
 	public _addChildRemote(child: Remotes): void {
 		const CurrentData = BazirRemotes.get(this);
-		if (BazirRemote.Is(CurrentData?.LastParent) || BazirRemoteContainer.Is(CurrentData?.LastParent)) {
-			CurrentData.LastParent._removeChildRemote(child);
+		const LastParent = CurrentData?.LastParent;
+		if (IsRemote(LastParent)) {
+			LastParent._removeChildRemote(child);
 		}
 		child._updateremoteparent(this.RemoteEvent);
 		if (isServer) {
@@ -442,6 +475,9 @@ export class BazirRemote {
 		this.ChildAdded.Fire(child);
 	}
 	private _removeChild(RemoteType: RemoteNameType, Path: string) {
+		assert(!isServer, "can only be called from the client");
+		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
+		assert(typeIs(RemoteType, "string"), "expected string got %s".format(typeOf(RemoteType)));
 		const CurrentData = BazirRemotes.get(this);
 		if (!CurrentData) {
 			return;
@@ -451,13 +487,16 @@ export class BazirRemote {
 		)?.Destroy();
 	}
 	private _createChild(RemoteType: RemoteNameType, Path: string) {
+		assert(!isServer, "can only be called from the client");
+		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
+		assert(typeIs(RemoteType, "string"), "expected string got %s".format(typeOf(RemoteType)));
 		switch (RemoteType) {
 			case "BazirRemote": {
-				this.Janitor.Add(new BazirRemote(`${Path}`, this));
+				new BazirRemote(`${Path}`, this);
 				break;
 			}
 			case "BazirRemoteContainer": {
-				this.Janitor.Add(new BazirRemoteContainer(`${Path}`, [], this));
+				new BazirRemoteContainer(`${Path}`, [], this);
 				break;
 			}
 			default:
@@ -468,23 +507,24 @@ export class BazirRemote {
 	public Destroy() {
 		const CurrentData = BazirRemotes.get(this);
 		if (CurrentData) {
-			if (CurrentData?.Parent) {
-				const ParrentData = BazirRemotes.get(CurrentData.Parent);
-				if (IsRemote(CurrentData.Parent)) {
-					CurrentData.Parent._removeChildRemote(this);
+			const CurrenParent = CurrentData.Parent;
+			if (CurrenParent) {
+				const ParrentData = BazirRemotes.get(CurrenParent);
+				if (IsRemote(CurrenParent)) {
+					CurrenParent._removeChildRemote(this);
 				}
 				if (ParrentData) {
 					ParrentData.Children.remove(ParrentData.Children.indexOf(this));
-					if (typeIs(CurrentData.Parent, "Instance") && ParrentData.Children.size() === 0) {
-						BazirRemotes.delete(CurrentData.Parent);
+					if (typeIs(CurrenParent, "Instance") && ParrentData.Children.size() === 0) {
+						BazirRemotes.delete(CurrenParent);
 					}
 				}
-				CurrentData.Parent = undefined;
+				/* CurrentData.Parent = undefined; */
 			}
 			CurrentData.Children.forEach((child) => {
 				child.Destroy();
 			});
-			CurrentData.Children.clear();
+			/* CurrentData.Children.clear(); */
 			BazirRemotes.delete(this);
 		}
 		this.Janitor.Destroy();
@@ -492,51 +532,64 @@ export class BazirRemote {
 		//setmetatable<BazirRemote>(this, undefined as unknown as LuaMetatable<BazirRemote>);
 	}
 	constructor(public Path: string, Parent: RemoteParent = script) {
-		BazirRemote.AssertParent(parent);
+		assert(typeIs(Path, "string"), `expects string, got ${type(Path)}`);
+		assert(Path.size() > 0, "path can't be empty");
+		assert(Path.size() < 256, "path can't be longer than 255 characters");
+		BazirRemote.AssertParent(Parent);
 		const mt = getmetatable(this) as LuaMetatable<BazirRemote>;
+		mt.__tostring = () => `BazirRemote<${this.Path}>`;
 		mt.__newindex = (remote, index, value) => {
-			warn(`[BazirRemote] ${this.Path} can't set ${index}`);
-			print(index, value, debug.traceback());
+			warn(`[BazirRemote] ${this.Path} set ${index} to ${value}`);
 			switch (index) {
 				case "RemoteEvent": {
 					assert(remote[index] === undefined, "Cannot change remote event");
 					rawset(remote, index, value);
-					break;
+					return;
 				}
 				case "Parent": {
-					remote._changeparent(value);
-					break;
+					print(index, value, remote[index], debug.traceback());
+					this._changeparent(value);
+					print(index, value, remote[index], debug.traceback());
+					return;
 				}
 				case "OnServerInvoke": {
-					/* assert(remote[index] === undefined, "Cannot change on server invoke"); */
+					assert(remote[index] === undefined, "Cannot change on server invoke");
 					assert(typeOf(value) === "function", "On server invoke must be function");
 					assert(isServer, "On server invoke can be set only on server");
 					rawset(remote, index, value);
-					break;
+					return;
 				}
 				case "OnClientInvoke": {
-					/* assert(remote[index] === undefined, "Cannot change on client invoke"); */
+					assert(remote[index] === undefined, "Cannot change on client invoke");
 					assert(typeOf(value) === "function", "On client invoke must be function");
 					assert(!isServer, "On client invoke can be set only on client");
 					rawset(remote, index, value);
-					break;
+					return;
 				}
 				default:
-					assert(rawget(mt, BRType.Loaded) !== true, "(cannot modify readonly [BazirRemote])");
+					assert(
+						rawget(remote, BRType.Loaded) !== true,
+						`[BazirRemote] ${remote.Path}[${index}] is read only`,
+					);
 					rawset(remote, index, value);
+					return;
 			}
 		};
-		assert(typeIs(Path, "string"), `expects string, got ${type(Path)}`);
-		assert(Path.size() > 0, "path can't be empty");
-		assert(Path.size() < 256, "path can't be longer than 255 characters");
-		this.RemoteEvent = this._GetorCreateRemote(Parent);
-		this._changeparent(Parent);
+		this._GetorCreateRemote(Parent);
+		/* this.Parent = game.Workspace;  */
+		this.Parent = game.GetService("ReplicatedStorage");
+		this.Parent = game.GetService("Lighting");
+		this.Parent = Parent;
 		assert(this.RemoteEvent !== undefined, "failed to create remote event");
 		if (isServer) {
 			this.Janitor.Add(
 				this.RemoteEvent.OnServerEvent.Connect((player, Request, uuid, data) => {
-					const args =
-						data !== undefined ? (HttpService.JSONDecode(Compression.decompress(data)) as unknown[]) : [];
+					if (typeOf(Request) !== "string") return;
+					if (typeOf(uuid) !== "string") return;
+					const result = opcall(() => {
+						return HttpService.JSONDecode(Compression.decompress(data)) as unknown[];
+					});
+					const args = result.success ? result.value : [];
 					Log.Info(
 						`[Server] - [${player.Name}] > ${numberToStorageSpace(
 							`${Request}${uuid}${HttpService.JSONEncode(args)}`.size(),
@@ -611,8 +664,12 @@ export class BazirRemote {
 		} else {
 			this.Janitor.Add(
 				this.RemoteEvent.OnClientEvent.Connect((Request, uuid, data) => {
-					const args =
-						data !== undefined ? (HttpService.JSONDecode(Compression.decompress(data)) as unknown[]) : [];
+					assert(typeOf(Request) === "string", "Request must be string");
+					assert(typeOf(uuid) === "string", "UUID must be string");
+					const result = opcall(() => {
+						return HttpService.JSONDecode(Compression.decompress(data)) as unknown[] as unknown[];
+					});
+					const args = result.success ? result.value : [];
 					Log.Info(
 						`[Client] - [localplayer] > ${numberToStorageSpace(
 							`${Request}${uuid}${HttpService.JSONEncode(args)}`.size(),
@@ -726,38 +783,44 @@ export class BazirRemote {
 					Promise.all(_removeChildrens).await();
 				}),
 			]).await();
+			rawset(this, BRType.Loaded, true);
 		}
-		rawset(this, BRType.Loaded, true);
 	}
 }
 export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRemote {
 	public static Is(object: unknown): object is typeof BazirRemoteContainer.prototype {
 		return typeIs(object, "table") && getmetatable(object) === BazirRemoteContainer;
 	}
-	private Containers = new Array<{
-		key: string;
-		Remote: Remotes;
-	}>();
+	private Remotes: Map<string, BazirRemote> = new Map();
 	get(key: string) {
-		return this.Containers.find((child) => child.key === `${key}`)?.Remote;
+		assert(typeOf(key) === "string", "key must be string");
+		return this.Remotes.get(key);
 	}
 	add(key: string) {
 		assert(isServer, "Cannot add remote on client");
-		const Remote = this.Janitor.Add(new BazirRemote(`${key}`, this));
-		this.Containers.push({ key, Remote });
-		return Remote;
+		assert(typeOf(key) === "string", "key must be string");
+		return new BazirRemote(`${key}`, this);
 	}
-	constructor(public Path: string, starters: T, parent?: RemoteParent) {
+	constructor(public Path: string, starters: T, parent: RemoteParent = script) {
+		assert(typeOf(Path) === "string", "Path must be string");
+		assert(typeOf(starters) === "table", "Starters must be table");
 		super(Path, parent);
 		if (isServer) {
 			starters.forEach((starter) => {
 				this.add(starter);
 			});
-		} else {
-			this.GetChildren().forEach((child) => {
-				this.Containers.push({ key: child.Path, Remote: child });
-			});
 		}
+		super.GetChildren().forEach(
+			async((child) => {
+				this.Remotes.set(child.Path, child);
+			}),
+		);
+		super.ChildAdded.Connect((child) => {
+			this.Remotes.set(child.Path, child);
+		});
+		super.ChildRemoved.Connect((child) => {
+			this.Remotes.delete(child.Path);
+		});
 	}
 }
 
@@ -771,9 +834,11 @@ type ClientEventsFunction = (...args: unknown[]) => unknown;
 export class ServerNetwork {
 	private RemoteContainer: BazirRemoteContainer;
 	Invoke<T>(key: string, player: Player, ...args: unknown[]): Promise<T> {
+		assert(typeOf(key) === "string", "key must be string");
 		return this.RemoteContainer.get(`${NetworkSettings.Function}`)!.InvokeClient<T>(player, `${key}`, ...args);
 	}
 	Fire(key: string, player: Player | Player[], ...args: unknown[]) {
+		assert(typeOf(key) === "string", "key must be string");
 		if (typeIs(player, "table")) {
 			return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireClients(
 				player as Player[],
@@ -781,15 +846,19 @@ export class ServerNetwork {
 				...args,
 			);
 		}
+		assert(typeOf(player) === "Instance", "player must be Instance");
 		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireClient(player, `${key}`, ...args);
 	}
 	FireAll(key: string, ...args: unknown[]) {
+		assert(typeOf(key) === "string", "key must be string");
 		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireAllClients(`${key}`, ...args);
 	}
 	FireOther(key: string, ignoreclient: Player[], ...args: unknown[]) {
+		assert(typeOf(key) === "string", "key must be string");
 		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireOtherClients(ignoreclient, `${key}`, ...args);
 	}
 	FireAllWithinDistance(key: string, position: Vector3, distance: number, ...args: unknown[]) {
+		assert(typeOf(key) === "string", "key must be string");
 		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireAllClientsWithinDistance(
 			position,
 			distance,
@@ -804,6 +873,7 @@ export class ServerNetwork {
 		distance: number,
 		...args: unknown[]
 	) {
+		assert(typeOf(key) === "string", "key must be string");
 		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireOtherClientsWithinDistance(
 			ignoreclient,
 			position,
@@ -813,6 +883,7 @@ export class ServerNetwork {
 		);
 	}
 	BindFunctions(functions: { [k: string]: ServerEventsFunction }) {
+		assert(typeOf(functions) === "table", "functions must be table");
 		const Remote = this.RemoteContainer.get(`${NetworkSettings.Function}`)!;
 		for (const [key, value] of pairs(functions)) {
 			new BazirRemote(`${key}`, Remote).OnServerInvoke = value;
@@ -820,16 +891,17 @@ export class ServerNetwork {
 		return this;
 	}
 	BindEvents(events: { [k: string]: ServerEventsFunction }) {
+		assert(typeOf(events) === "table", "events must be table");
 		const Remote = this.RemoteContainer.get(`${NetworkSettings.Event}`)!;
 		for (const [key, value] of pairs(events)) {
 			new BazirRemote(`${key}`, Remote).OnServerEvent.Connect(value);
 		}
 		return this;
 	}
-	constructor(parent?: RemoteParent) {
+	constructor(parent: RemoteParent = script, name = NetworkSettings.Name) {
 		assert(isServer, "Cannot create server network on client");
 		this.RemoteContainer = new BazirRemoteContainer(
-			NetworkSettings.Name,
+			name,
 			[`${NetworkSettings.Function}`, `${NetworkSettings.Event}`],
 			parent,
 		);
@@ -849,18 +921,22 @@ export class ClientNetwork {
 		return typeIs(object, "table") && getmetatable(object) === ClientNetwork;
 	}
 	Invoke<T>(key: string, ...args: unknown[]): Promise<T> | undefined {
+		assert(typeOf(key) === "string", "key must be string");
 		return this.Networks[NetworkSettings.Function].get(key)?.InvokeServer<T>(...args);
 	}
 	Fire(key: string, ...args: unknown[]) {
+		assert(typeOf(key) === "string", "key must be string");
 		return this.Networks[NetworkSettings.Event].get(key)?.FireServer(...args);
 	}
 	BindFunctions(functions: { [k: string]: ClientEventsFunction }) {
+		assert(typeOf(functions) === "table", "functions must be table");
 		for (const [key, value] of pairs(functions)) {
 			this.Comunications[NetworkSettings.Function].set(`${key}`, value);
 		}
 		return this;
 	}
 	BindEvents(events: { [k: string]: ClientEventsFunction }) {
+		assert(typeOf(events) === "table", "events must be table");
 		for (const [key, value] of pairs(events)) {
 			(
 				this.Comunications[NetworkSettings.Event].get(`${key}`) ??
@@ -869,32 +945,53 @@ export class ClientNetwork {
 		}
 		return this;
 	}
-	constructor(parent?: RemoteParent) {
+	constructor(parent: RemoteParent = script, name = NetworkSettings.Name) {
 		assert(!isServer, "Cannot create client network on server");
-		this.RemoteContainer = new BazirRemoteContainer(NetworkSettings.Name, [], parent);
-		this.RemoteContainer.get(`${NetworkSettings.Event}`)?.OnClientEvent.Connect((key, ...args) => {
+		this.RemoteContainer = new BazirRemoteContainer(name, [], parent);
+
+		const EventRemote = this.RemoteContainer.get(`${NetworkSettings.Event}`)!;
+		const FunctionRemote = this.RemoteContainer.get(`${NetworkSettings.Function}`)!;
+
+		EventRemote?.GetChildren().forEach(
+			async((child) => {
+				this.Networks[NetworkSettings.Event].set(child.Path, child);
+			}),
+		);
+		EventRemote.ChildAdded.Connect((child) => {
+			this.Networks[NetworkSettings.Event].set(child.Path, child);
+		});
+		EventRemote.ChildRemoved.Connect((child) => {
+			this.Networks[NetworkSettings.Event].delete(child.Path);
+		});
+		EventRemote?.OnClientEvent.Connect((key, ...args) => {
 			assert(typeIs(key, "string"), "Key must be string");
 			const funcs = this.Comunications[NetworkSettings.Event].get(key);
 			if (funcs) {
-				funcs.forEach(async (func) => func(...args));
+				funcs.forEach(
+					async((func) => {
+						func(...args);
+					}),
+				);
 			}
 		});
-		this.RemoteContainer.get(`${NetworkSettings.Function}`)!.OnClientInvoke = (key, ...args) => {
+
+		FunctionRemote?.GetChildren().forEach(
+			async((child) => {
+				this.Networks[NetworkSettings.Function].set(child.Path, child);
+			}),
+		);
+		FunctionRemote.ChildAdded.Connect((child) => {
+			this.Networks[NetworkSettings.Function].set(child.Path, child);
+		});
+		FunctionRemote.ChildRemoved.Connect((child) => {
+			this.Networks[NetworkSettings.Function].delete(child.Path);
+		});
+		FunctionRemote!.OnClientInvoke = (key, ...args) => {
 			assert(typeIs(key, "string"), "Key must be string");
 			const func = this.Comunications[NetworkSettings.Function].get(key);
 			assert(func !== undefined, "Cannot find function");
 			return func(...args);
 		};
-		this.RemoteContainer.get(`${NetworkSettings.Function}`)
-			?.GetChildren()
-			.forEach((child) => {
-				this.Networks[NetworkSettings.Function].set(child.Path, child);
-			});
-		this.RemoteContainer.get(`${NetworkSettings.Event}`)
-			?.GetChildren()
-			.forEach((child) => {
-				this.Networks[NetworkSettings.Event].set(child.Path, child);
-			});
 	}
 }
 
@@ -911,14 +1008,16 @@ function CleanupRemotes() {
 		current.Children.forEach((child) => {
 			child?.Destroy();
 		});
-		current.Children.clear();
+		/* current.Children.clear(); */
 	});
-	BazirRemotes.clear();
+	/* BazirRemotes.clear(); */
 }
 
 function Cleanup() {
+	print("Cleaning up...", BazirRemotes);
 	CleanupQueue();
 	CleanupRemotes();
+	print("Cleaned up", BazirRemotes);
 }
 
 if (isServer) {
