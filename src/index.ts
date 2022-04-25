@@ -66,6 +66,7 @@ const enum RequestTypes {
 	ChildAdded = "ChildAdded",
 	ChildRemoved = "ChildRemoved",
 	GetTags = "GetTags",
+	GetProperties = "GetProperties",
 	UpdateTag = "UpdateTag",
 }
 
@@ -206,51 +207,19 @@ export class BazirRemote {
 	}
 	/** @hidden */
 	public _GetChildren() {
-		let returnPromise: Promise<
-			{
-				RemoteType: RemoteNameType;
-				Path: string;
-			}[]
-		>; //Promise<typeof BazirRemote.prototype.RemoteEvent[]>
-		if (isServer) {
-			returnPromise = new Promise<
-				{
-					RemoteType: RemoteNameType;
-					Path: string;
-				}[]
-			>((resolve) => {
-				resolve(
-					this.GetChildren().map((child) => {
-						return {
-							RemoteType: GetRemoteType(child),
-							Path: child.Path,
-						};
-					}),
-				);
-			});
-		} else {
-			const uuid = HttpService.GenerateGUID(false);
-			returnPromise = new Promise<
-				{
-					RemoteType: RemoteNameType;
-					Path: string;
-				}[]
-			>((resolve, reject) => {
-				YieldQueue[uuid] = coroutine.running();
-				this.RemoteEvent.FireServer(RequestTypes.GetChildren, uuid);
-				const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
-				if (!thread[0]) {
-					return reject(thread[1]);
-				}
-				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-				//@ts-ignore
-				resolve(...thread[1]);
-			});
-			returnPromise.finally(() => {
-				YieldQueue[uuid] = undefined;
-			});
+		return this.GetChildren().map((child) => {
+			return {
+				RemoteType: GetRemoteType(child),
+				Path: child.Path,
+			};
+		})
+	}
+	/** @hidden */
+	private _GetProperties() {
+		return {
+			Tags: this.Tags,
+			Childrens: this._GetChildren(),
 		}
-		return returnPromise.timeout(Settings.Servertimeout);
 	}
 	public GetChildren() {
 		return BazirRemotes.get(this)?.Children ?? [];
@@ -474,6 +443,11 @@ export class BazirRemote {
 		}
 		this.ChildAdded.Fire(child);
 	}
+	/** @hidden */
+	private _request() {
+		//Soon
+		//_request(FireClient, Request, uuid, ...args)
+	}
 	private _removeChild(RemoteType: RemoteNameType, Path: string) {
 		assert(!isServer, "can only be called from the client");
 		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
@@ -625,7 +599,7 @@ export class BazirRemote {
 								Compression.compress(
 									HttpService.JSONEncode([
 										pcall(() => {
-											return [this._GetChildren().await()[1]];
+											return [this._GetChildren()];
 										}),
 									]),
 								),
@@ -641,6 +615,21 @@ export class BazirRemote {
 									HttpService.JSONEncode([
 										pcall(() => {
 											return [this.Tags];
+										}),
+									]),
+								),
+							);
+							break;
+						}
+						case RequestTypes.GetProperties: {
+							this.RemoteEvent.FireClient(
+								player,
+								Request,
+								uuid as string,
+								Compression.compress(
+									HttpService.JSONEncode([
+										pcall(() => {
+											return this._GetProperties();
 										}),
 									]),
 								),
@@ -738,43 +727,55 @@ export class BazirRemote {
 							}
 							break;
 						}
+						case RequestTypes.GetProperties: {
+							const Thread = YieldQueue[uuid];
+							if (Thread && coroutine.status(Thread) === "suspended") {
+								coroutine.resume(Thread, ...args);
+							}
+							break;
+						}
 						case RequestTypes.UpdateTag: {
 							this.Tags.set(...(args as [string, unknown]));
 							break;
 						}
 						default:
+							//Add a warning
 							break;
 					}
 				}),
 			);
 			const Taguuid = HttpService.GenerateGUID(false);
-			Promise.all([
-				new Promise<typeof BazirRemote.prototype.Tags>((resolve, reject) => {
-					YieldQueue[Taguuid] = coroutine.running();
-					this.RemoteEvent.FireServer(RequestTypes.GetTags, Taguuid);
-					const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
-					if (!thread[0]) {
-						return reject(thread[1]);
-					}
-					// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-					//@ts-ignore
-					resolve(...thread[1]);
-				})
-					.timeout(Settings.Servertimeout)
-					.then((value) => {
-						this.Tags = value;
-					})
-					.finally(() => {
-						YieldQueue[Taguuid] = undefined;
-					}),
-				this._GetChildren().then((Remotes) => {
-					const _removeChildrens = new Array<Promise<void>>();
-					Remotes.forEach(({ RemoteType, Path }) => {
-						_removeChildrens.push(Promise.try(() => this._createChild(RemoteType, Path)));
+			// const [success, result] = 
+			new Promise<ReturnType<typeof BazirRemote.prototype._GetProperties>>((resolve, reject) => {
+				YieldQueue[Taguuid] = coroutine.running();
+				this.RemoteEvent.FireServer(RequestTypes.GetProperties, Taguuid);
+				const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
+				if (!thread[0]) {
+					return reject(thread[1]);
+				}
+				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+				//@ts-ignore
+				resolve(...thread[1]);
+			})
+				.timeout(Settings.Servertimeout)
+				.then(({ Tags, Childrens }) => {
+					const YieldPromises = new Array<Promise<unknown>>();
+					this.Tags = Tags;
+					Childrens.forEach(({ RemoteType, Path }) => {
+						YieldPromises.push(Promise.try(() => this._createChild(RemoteType, Path)));
 					});
-					Promise.all(_removeChildrens).await();
-				}),
-			]).await();
+					Promise.all(YieldPromises).await();
+				})
+				.finally(() => {
+					YieldQueue[Taguuid] = undefined;
+				})
+				.expect()
+			/*
+				YieldQueue[Taguuid] = undefined;
+				if (!success) {
+					throw `failed to get properties on server, ${result}`
+				}
+			*/
 			rawset(this, BRType.Loaded, true);
 		}
 	}
