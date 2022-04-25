@@ -1,6 +1,6 @@
 {
   "name": "@bazir/remote",
-  "version": "1.0.0-beta.12",
+  "version": "1.0.0-beta.14",
   "description": "",
   "main": "out/init.lua",
   "scripts": {
@@ -39,6 +39,7 @@
     "typescript": "^4.6.3"
   },
   "dependencies": {
+    "@bazir/remote": "^1.0.0-beta.14",
     "@rbxts/janitor": "^1.14.1-ts.0"
   }
 }
