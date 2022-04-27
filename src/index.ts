@@ -129,7 +129,7 @@ function GetRemoteType(remote: Remotes): RemoteNameType {
 	} else if (BazirRemoteContainer.Is(remote)) {
 		return "BazirRemoteContainer";
 	}
-	error("Unknown remote type");
+	throw "Unknown remote type";
 }
 
 function IsRemote(remote: unknown): remote is BazirRemote | BazirRemoteContainer<[]> {
@@ -212,14 +212,14 @@ export class BazirRemote {
 				RemoteType: GetRemoteType(child),
 				Path: child.Path,
 			};
-		})
+		});
 	}
 	/** @hidden */
 	private _GetProperties() {
 		return {
 			Tags: this.Tags,
 			Childrens: this._GetChildren(),
-		}
+		};
 	}
 	public GetChildren() {
 		return BazirRemotes.get(this)?.Children ?? [];
@@ -474,7 +474,7 @@ export class BazirRemote {
 				break;
 			}
 			default:
-				warn(`${RemoteType} isn't supported`);
+				Log.Warn("unknown remote type %s".format(RemoteType));
 				break;
 		}
 	}
@@ -629,7 +629,7 @@ export class BazirRemote {
 								Compression.compress(
 									HttpService.JSONEncode([
 										pcall(() => {
-											return this._GetProperties();
+											return [this._GetProperties()];
 										}),
 									]),
 								),
@@ -637,6 +637,7 @@ export class BazirRemote {
 							break;
 						}
 						default:
+							Log.Info(`[Server] - [${player.Name}] > unknown request ${Request}`);
 							player.Kick("Invalid Request");
 							break;
 					}
@@ -739,24 +740,25 @@ export class BazirRemote {
 							break;
 						}
 						default:
-							//Add a warning
+							Log.Info(`[Client] - [localplayer] > Unknown request: ${Request}`);
 							break;
 					}
 				}),
 			);
 			const Taguuid = HttpService.GenerateGUID(false);
-			// const [success, result] = 
-			new Promise<ReturnType<typeof BazirRemote.prototype._GetProperties>>((resolve, reject) => {
-				YieldQueue[Taguuid] = coroutine.running();
-				this.RemoteEvent.FireServer(RequestTypes.GetProperties, Taguuid);
-				const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
-				if (!thread[0]) {
-					return reject(thread[1]);
-				}
-				// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-				//@ts-ignore
-				resolve(...thread[1]);
-			})
+			const [success, result] = new Promise<ReturnType<typeof BazirRemote.prototype._GetProperties>>(
+				(resolve, reject) => {
+					YieldQueue[Taguuid] = coroutine.running();
+					this.RemoteEvent.FireServer(RequestTypes.GetProperties, Taguuid);
+					const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
+					if (!thread[0]) {
+						return reject(thread[1]);
+					}
+					// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+					//@ts-ignore
+					resolve(...thread[1]);
+				},
+			)
 				.timeout(Settings.Servertimeout)
 				.then(({ Tags, Childrens }) => {
 					const YieldPromises = new Array<Promise<unknown>>();
@@ -766,18 +768,14 @@ export class BazirRemote {
 					});
 					Promise.all(YieldPromises).await();
 				})
-				.finally(() => {
-					YieldQueue[Taguuid] = undefined;
-				})
-				.expect()
-			/*
-				YieldQueue[Taguuid] = undefined;
-				if (!success) {
-					throw `failed to get properties on server, ${result}`
-				}
-			*/
-			rawset(this, BRType.Loaded, true);
+				.await();
+
+			YieldQueue[Taguuid] = undefined;
+			if (!success) {
+				throw `failed to get properties on server, ${result} for ${this.Path}`;
+			}
 		}
+		rawset(this, BRType.Loaded, true);
 	}
 }
 export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRemote {
@@ -788,6 +786,18 @@ export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRe
 	get(key: string) {
 		assert(typeOf(key) === "string", "key must be string");
 		return this.Remotes.get(key);
+	}
+	waitfor(key: string, timeout: number = isServer ? Settings.Servertimeout : Settings.Clienttimeout) {
+		assert(typeOf(key) === "string", "key must be string");
+		assert(typeOf(timeout) === "number", "timeout must be number");
+		let Remote;
+		while (!Remote) {
+			Remote = this.get(key);
+			if (Remote) {
+				return Remote;
+			}
+			this.ChildAdded.Wait();
+		}
 	}
 	add(key: string) {
 		assert(isServer, "Cannot add remote on client");
@@ -940,8 +950,10 @@ export class ClientNetwork {
 		assert(!isServer, "Cannot create client network on server");
 		this.RemoteContainer = new BazirRemoteContainer(name, [], parent);
 
-		const EventRemote = this.RemoteContainer.get(`${NetworkSettings.Event}`)!;
-		const FunctionRemote = this.RemoteContainer.get(`${NetworkSettings.Function}`)!;
+		const EventRemote = this.RemoteContainer.waitfor(`${NetworkSettings.Event}`, Settings.Clienttimeout);
+		assert(EventRemote, "remote event not found");
+		const FunctionRemote = this.RemoteContainer.waitfor(`${NetworkSettings.Function}`, Settings.Clienttimeout);
+		assert(FunctionRemote, "remote function not found");
 
 		EventRemote.ChildAdded.Connect((child) => {
 			this.Networks[NetworkSettings.Event].set(child.Path, child);
