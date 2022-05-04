@@ -57,22 +57,34 @@ const enum BRType {
 	Loaded = "_Loaded_",
 }
 
-const enum RequestTypes {
-	FireServer = "FireServer",
-	InvokeServer = "InvokeServer",
-	FireClient = "FireClient",
-	InvokeClient = "InvokeClient",
-	GetChildren = "GetChildren",
-	ChildAdded = "ChildAdded",
-	ChildRemoved = "ChildRemoved",
-	GetTags = "GetTags",
-	GetProperties = "GetProperties",
-	UpdateTag = "UpdateTag",
+const enum Events {
+	FireServer = "Event<FireServer>",
+	FireClient = "Event<FireClient>",
+	FireAllClients = "Event<FireAllClients>",
+}
+
+const enum Requests {
+	FireServer = "Request<FireServer>",
+	InvokeServer = "Request<InvokeServer>",
+	FireClient = "Request<FireClient>",
+	InvokeClient = "Request<InvokeClient>",
+	GetChildren = "Request<GetChildren>",
+	ChildAdded = "Request<ChildAdded>",
+	ChildRemoved = "Request<ChildRemoved>",
+	GetTags = "Request<GetTags>",
+	GetProperties = "Request<GetProperties>",
+	UpdateTag = "Request<UpdateTag>",
 }
 
 type Remotes = BazirRemote | BazirRemoteContainer<[]>;
 type RemoteParent = Remotes | Instance;
 type RemoteNameType = "BazirRemote" | "BazirRemoteContainer";
+
+//TODO
+/* type RequestTypes =
+	| [Events.FireServer, Requests, string, ...unknown[]]
+	| [Events.FireClient, Player, Requests, string, ...unknown[]]
+	| [Events.FireAllClients, Requests, string, ...unknown[]]; */
 
 const YieldQueue: { [K: string]: thread | undefined } = {};
 const BazirRemotes = new Map<
@@ -154,7 +166,7 @@ export class BazirRemote {
 	public ChildAdded = this.Janitor.Add(new Signal<(Child: BazirRemote) => void>());
 	public ChildRemoved = this.Janitor.Add(new Signal<(Child: BazirRemote) => void>());
 	private RemoteEvent!: RemoteEvent<
-		(Request: typeof RequestTypes[keyof typeof RequestTypes], uuid: string, ...args: unknown[]) => void
+		(Request: typeof Requests[keyof typeof Requests], uuid: string, ...args: unknown[]) => void
 	>;
 	public Parent!: RemoteParent;
 	public InvokeClient<T>(player: Player, ...args: unknown[]) {
@@ -163,12 +175,7 @@ export class BazirRemote {
 		const uuid = HttpService.GenerateGUID(false);
 		const returnPromise = new Promise<T>((resolve, reject) => {
 			YieldQueue[uuid] = coroutine.running();
-			this.RemoteEvent.FireClient(
-				player,
-				RequestTypes.InvokeClient,
-				uuid,
-				Compression.compress(HttpService.JSONEncode(args)),
-			);
+			this._request_client(uuid, Events.FireClient, Requests.InvokeClient, player, ...args);
 			const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
 			if (!thread[0]) {
 				return reject(thread[1]);
@@ -187,11 +194,7 @@ export class BazirRemote {
 		const uuid = HttpService.GenerateGUID(false);
 		const returnPromise = new Promise<T>((resolve, reject) => {
 			YieldQueue[uuid] = coroutine.running();
-			this.RemoteEvent.FireServer(
-				RequestTypes.InvokeServer,
-				uuid,
-				Compression.compress(HttpService.JSONEncode(args)),
-			);
+			this._request_server(uuid, Events.FireServer, Requests.InvokeServer, ...args);
 			const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
 			if (!thread[0]) {
 				return reject(thread[1]);
@@ -226,21 +229,18 @@ export class BazirRemote {
 	}
 	public FireAllClients(...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
-		return this.RemoteEvent.FireAllClients(
-			RequestTypes.FireClient,
+		return this._request_client(
 			HttpService.GenerateGUID(false),
-			Compression.compress(HttpService.JSONEncode(args)),
+			Events.FireAllClients,
+			Requests.FireClient,
+			undefined,
+			...args,
 		);
 	}
 	public FireClient(player: Player, ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
 		assert(typeIs(player, "Instance") && player.IsA("Player"), "expected Player got %s".format(typeOf(player)));
-		return this.RemoteEvent.FireClient(
-			player,
-			RequestTypes.FireClient,
-			HttpService.GenerateGUID(false),
-			Compression.compress(HttpService.JSONEncode(args)),
-		);
+		return this._request_client(undefined, Events.FireClient, Requests.FireClient, player, ...args);
 	}
 	public FireClients(players: Player[], ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
@@ -294,20 +294,18 @@ export class BazirRemote {
 	}
 	public FireServer(...args: unknown[]) {
 		assert(!isServer, "can only be called from the client");
-		return this.RemoteEvent.FireServer(
-			RequestTypes.FireServer,
-			HttpService.GenerateGUID(false),
-			Compression.compress(HttpService.JSONEncode(args)),
-		);
+		return this._request_server(undefined, Events.FireServer, Requests.FireServer, ...args);
 	}
 	public SetTag(key: string, value: unknown) {
 		assert(typeIs(key, "string"), "expected string got %s".format(typeOf(key)));
 		this.Tags.set(key, value);
 		if (isServer) {
-			this.RemoteEvent.FireAllClients(
-				RequestTypes.UpdateTag,
+			this._request_client(
 				HttpService.GenerateGUID(false),
-				Compression.compress(HttpService.JSONEncode([key, value])),
+				Events.FireAllClients,
+				Requests.UpdateTag,
+				undefined,
+				[key, value],
 			);
 		}
 	}
@@ -405,17 +403,15 @@ export class BazirRemote {
 	public _removeChildRemote(child: Remotes) {
 		this.ChildRemoved.Fire(child);
 		if (isServer) {
-			this.RemoteEvent.FireAllClients(
-				RequestTypes.ChildRemoved,
+			this._request_client(
 				HttpService.GenerateGUID(false),
-				Compression.compress(
-					HttpService.JSONEncode([
-						{
-							RemoteType: GetRemoteType(child),
-							Path: child.Path,
-						},
-					]),
-				),
+				Events.FireAllClients,
+				Requests.ChildRemoved,
+				undefined,
+				{
+					RemoteType: GetRemoteType(child),
+					Path: child.Path,
+				},
 			);
 		}
 	}
@@ -428,25 +424,67 @@ export class BazirRemote {
 		}
 		child._updateremoteparent(this.RemoteEvent);
 		if (isServer) {
-			this.RemoteEvent.FireAllClients(
-				RequestTypes.ChildAdded,
+			this._request_client(
 				HttpService.GenerateGUID(false),
-				Compression.compress(
-					HttpService.JSONEncode([
-						{
-							RemoteType: GetRemoteType(child),
-							Path: child.Path,
-						},
-					]),
-				),
+				Events.FireAllClients,
+				Requests.ChildAdded,
+				undefined,
+				{
+					RemoteType: GetRemoteType(child),
+					Path: child.Path,
+				},
 			);
 		}
 		this.ChildAdded.Fire(child);
 	}
-	/** @hidden */
-	private _request() {
-		//Soon
-		//_request(FireClient, Request, uuid, ...args)
+
+	private _request_server<E extends Events, R extends Requests>(
+		uuid = HttpService.GenerateGUID(false),
+		Event: E,
+		Request: R,
+		...args: unknown[]
+	) {
+		assert(!isServer, "this function is only available on the client");
+		assert(typeIs(Event, "string"), "expected Events got %s".format(typeOf(Event)));
+		assert(typeIs(Request, "string"), "expected Requests got %s".format(typeOf(Request)));
+		switch (Event) {
+			case Events.FireServer: {
+				this.RemoteEvent.FireServer(Request, uuid, Compression.compress(HttpService.JSONEncode(args)));
+				break;
+			}
+			default:
+				throw "unknown event";
+		}
+	}
+
+	private _request_client<E extends Events, R extends Requests>(
+		uuid = HttpService.GenerateGUID(false),
+		Event: E,
+		Request: R,
+		player: E extends Events.FireClient ? Player : void,
+		...args: unknown[]
+	) {
+		assert(isServer, "this function is only available on the server");
+		assert(typeIs(Event, "string"), "expected Events got %s".format(typeOf(Event)));
+		assert(typeIs(Request, "string"), "expected Requests got %s".format(typeOf(Request)));
+		switch (Event) {
+			case Events.FireClient: {
+				assert(
+					typeIs(player, "Instance") && player.IsA("Player"),
+					"expected Player got %s".format(typeOf(player)),
+				);
+				this.RemoteEvent.FireClient(player, Request, uuid, Compression.compress(HttpService.JSONEncode(args)));
+				break;
+			}
+			case Events.FireAllClients: {
+				Players.GetPlayers().forEach((player) => {
+					this._request_client(uuid, Events.FireClient, Request, player, ...args);
+				});
+				break;
+			}
+			default:
+				throw "unknown event";
+		}
 	}
 	private _removeChild(RemoteType: RemoteNameType, Path: string) {
 		assert(!isServer, "can only be called from the client");
@@ -498,12 +536,12 @@ export class BazirRemote {
 			CurrentData.Children.forEach((child) => {
 				child.Destroy();
 			});
-			/* CurrentData.Children.clear(); */
+			CurrentData.Children.clear();
 			BazirRemotes.delete(this);
 		}
 		this.Janitor.Destroy();
-		//table.clear(this);
-		//setmetatable<BazirRemote>(this, undefined as unknown as LuaMetatable<BazirRemote>);
+		table.clear(this);
+		setmetatable<BazirRemote>(this, undefined as unknown as LuaMetatable<BazirRemote>);
 	}
 	constructor(public Path: string, Parent: RemoteParent = script) {
 		assert(typeIs(Path, "string"), `expects string, got ${type(Path)}`);
@@ -550,8 +588,9 @@ export class BazirRemote {
 		if (isServer) {
 			this.Janitor.Add(
 				this.RemoteEvent.OnServerEvent.Connect((player, Request, uuid, data) => {
-					if (typeOf(Request) !== "string") return;
-					if (typeOf(uuid) !== "string") return;
+					if (!typeIs(Request, "string") || !typeIs(uuid, "string")) {
+						return;
+					}
 					const result = opcall(() => {
 						return HttpService.JSONDecode(Compression.decompress(data)) as unknown[];
 					});
@@ -562,77 +601,66 @@ export class BazirRemote {
 						)} - ${Request} - ${uuid} => ${(args as (keyof CheckablePrimitives)[])
 							.map((arg) => type(arg))
 							.join(", ")}`,
+						args,
 					);
 					switch (Request) {
-						case RequestTypes.InvokeServer: {
-							this.RemoteEvent.FireClient(
-								player,
-								Request,
+						case Requests.InvokeServer: {
+							this._request_client(
 								uuid as string,
-								Compression.compress(
-									HttpService.JSONEncode([
-										pcall(() => {
-											assert(this.OnServerInvoke !== undefined, `${Path} isn't invoke on server`);
-											return [this.OnServerInvoke(player, ...args)];
-										}),
-									]),
-								),
+								Events.FireClient,
+								Request,
+								player,
+								pcall(() => {
+									assert(this.OnServerInvoke !== undefined, `${Path} isn't invoke on server`);
+									return [this.OnServerInvoke(player, ...args)];
+								}),
 							);
 							break;
 						}
-						case RequestTypes.InvokeClient: {
+						case Requests.InvokeClient: {
 							const Thread = YieldQueue[uuid as string];
 							if (Thread && coroutine.status(Thread) === "suspended") {
 								coroutine.resume(Thread, ...args);
 							}
 							break;
 						}
-						case RequestTypes.FireServer: {
+						case Requests.FireServer: {
 							this.OnServerEvent.Fire(player, ...args);
 							break;
 						}
-						case RequestTypes.GetChildren: {
-							this.RemoteEvent.FireClient(
-								player,
-								Request,
+						case Requests.GetChildren: {
+							this._request_client(
 								uuid as string,
-								Compression.compress(
-									HttpService.JSONEncode([
-										pcall(() => {
-											return [this._GetChildren()];
-										}),
-									]),
-								),
+								Events.FireClient,
+								Request,
+								player,
+								pcall(() => {
+									return [this._GetChildren()];
+								}),
 							);
 							break;
 						}
-						case RequestTypes.GetTags: {
-							this.RemoteEvent.FireClient(
-								player,
-								Request,
+						case Requests.GetTags: {
+							this._request_client(
 								uuid as string,
-								Compression.compress(
-									HttpService.JSONEncode([
-										pcall(() => {
-											return [this.Tags];
-										}),
-									]),
-								),
+								Events.FireClient,
+								Request,
+								player,
+								pcall(() => {
+									return [this.Tags];
+								}),
 							);
 							break;
 						}
-						case RequestTypes.GetProperties: {
-							this.RemoteEvent.FireClient(
-								player,
-								Request,
+						case Requests.GetProperties: {
+							this._request_client(
 								uuid as string,
-								Compression.compress(
-									HttpService.JSONEncode([
-										pcall(() => {
-											return [this._GetProperties()];
-										}),
-									]),
-								),
+								Events.FireClient,
+								Request,
+								player,
+								pcall(() => {
+									return [this._GetProperties()];
+								}),
 							);
 							break;
 						}
@@ -646,8 +674,8 @@ export class BazirRemote {
 		} else {
 			this.Janitor.Add(
 				this.RemoteEvent.OnClientEvent.Connect((Request, uuid, data) => {
-					assert(typeOf(Request) === "string", "Request must be string");
-					assert(typeOf(uuid) === "string", "UUID must be string");
+					assert(typeIs(Request, "string"), "expected string got %s".format(typeOf(Request)));
+					assert(typeIs(uuid, "string"), "expected string got %s".format(typeOf(uuid)));
 					const result = opcall(() => {
 						return HttpService.JSONDecode(Compression.decompress(data)) as unknown[] as unknown[];
 					});
@@ -658,84 +686,88 @@ export class BazirRemote {
 						)} - ${Request} - ${uuid} => ${(args as (keyof CheckablePrimitives)[])
 							.map((arg) => type(arg))
 							.join(", ")}`,
+						args,
 					);
 					switch (Request) {
-						case RequestTypes.InvokeServer: {
+						case Requests.InvokeServer: {
 							const Thread = YieldQueue[uuid];
 							if (Thread && coroutine.status(Thread) === "suspended") {
 								coroutine.resume(Thread, ...args);
 							}
 							break;
 						}
-						case RequestTypes.InvokeClient: {
-							this.RemoteEvent.FireServer(
-								Request,
+						case Requests.InvokeClient: {
+							this._request_server(
 								uuid,
-								Compression.compress(
-									HttpService.JSONEncode([
-										pcall(() => {
-											assert(this.OnClientInvoke !== undefined, `${Path} isn't invoke on client`);
-											return [this.OnClientInvoke(...args)];
-										}),
-									]),
-								),
+								Events.FireServer,
+								Request,
+								pcall(() => {
+									assert(this.OnClientInvoke !== undefined, `${Path} isn't invoke on client`);
+									return [this.OnClientInvoke(...args)];
+								}),
 							);
 							break;
 						}
-						case RequestTypes.FireClient: {
+						case Requests.FireClient: {
 							this.OnClientEvent.Fire(...args);
 							break;
 						}
-						case RequestTypes.GetChildren: {
+						case Requests.GetChildren: {
 							const Thread = YieldQueue[uuid];
 							if (Thread && coroutine.status(Thread) === "suspended") {
 								coroutine.resume(Thread, ...args);
 							}
 							break;
 						}
-						case RequestTypes.ChildRemoved: {
+						case Requests.ChildRemoved: {
 							assert(typeOf(args) === "table", "ChildRemoved args isn't table");
 							assert(args.size() === 1, "ChildRemoved args data length isn't 1");
 							const Child = args[0];
-							assert(typeOf(Child) === "table", `Child must be table`);
+							assert(typeIs(Child, "table"), `expect Child to be table but got ${typeOf(Child)}`);
 							const { RemoteType, Path } = Child as {
 								RemoteType: RemoteNameType;
 								Path: string;
 							};
-							assert(typeOf(RemoteType) === "string", `RemoteType must be string`);
-							assert(typeOf(Path) === "string", `Path must be string`);
+							assert(
+								typeIs(RemoteType, "string"),
+								`expect RemoteType to be string but got ${typeOf(RemoteType)}`,
+							);
+							assert(typeIs(Path, "string"), `expect Path to be string but got ${typeOf(Path)}`);
 							this._removeChild(RemoteType, Path);
 							break;
 						}
-						case RequestTypes.ChildAdded: {
+						case Requests.ChildAdded: {
 							assert(typeOf(args) === "table", "ChildRemoved args isn't table");
 							assert(args.size() === 1, "ChildAdded args data length isn't 1");
 							const Child = args[0];
-							assert(typeOf(Child) === "table", `Child must be table`);
+							assert(typeIs(Child, "table"), `expect Child to be table but got ${typeOf(Child)}`);
 							const { RemoteType, Path } = Child as {
 								RemoteType: RemoteNameType;
 								Path: string;
 							};
-							assert(typeOf(RemoteType) === "string", `RemoteType must be string`);
-							assert(typeOf(Path) === "string", `Path must be string`);
+							assert(
+								typeIs(RemoteType, "string"),
+								`expect RemoteType to be string but got ${typeOf(RemoteType)}`,
+							);
+							assert(typeIs(Path, "string"), `expect Path to be string but got ${typeOf(Path)}`);
 							this._createChild(RemoteType, Path);
 							break;
 						}
-						case RequestTypes.GetTags: {
+						case Requests.GetTags: {
 							const Thread = YieldQueue[uuid];
 							if (Thread && coroutine.status(Thread) === "suspended") {
 								coroutine.resume(Thread, ...args);
 							}
 							break;
 						}
-						case RequestTypes.GetProperties: {
+						case Requests.GetProperties: {
 							const Thread = YieldQueue[uuid];
 							if (Thread && coroutine.status(Thread) === "suspended") {
 								coroutine.resume(Thread, ...args);
 							}
 							break;
 						}
-						case RequestTypes.UpdateTag: {
+						case Requests.UpdateTag: {
 							this.Tags.set(...(args as [string, unknown]));
 							break;
 						}
@@ -749,7 +781,7 @@ export class BazirRemote {
 			const [success, result] = new Promise<ReturnType<typeof BazirRemote.prototype._GetProperties>>(
 				(resolve, reject) => {
 					YieldQueue[Taguuid] = coroutine.running();
-					this.RemoteEvent.FireServer(RequestTypes.GetProperties, Taguuid);
+					this._request_server(Taguuid, Events.FireServer, Requests.GetProperties);
 					const thread = coroutine.yield()[0] as LuaTuple<[false, string] | [true, unknown[]]>;
 					if (!thread[0]) {
 						return reject(thread[1]);
@@ -790,13 +822,22 @@ export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRe
 	waitfor(key: string, timeout: number = isServer ? Settings.Servertimeout : Settings.Clienttimeout) {
 		assert(typeOf(key) === "string", "key must be string");
 		assert(typeOf(timeout) === "number", "timeout must be number");
+		let DeltaTime = 0;
+		let Warned = false;
 		let Remote;
 		while (!Remote) {
 			Remote = this.get(key);
 			if (Remote) {
 				return Remote;
 			}
-			this.ChildAdded.Wait();
+			if (DeltaTime >= 5 && !Warned) {
+				Warned = true;
+				warn(debug.traceback(`Infinite Yield Possible on waitfor ${key} on ${this.Path}`));
+			}
+			if (DeltaTime >= timeout) {
+				throw `failed to wait for ${key} on ${this.Path}`;
+			}
+			DeltaTime += task.wait();
 		}
 	}
 	add(key: string) {
