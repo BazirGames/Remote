@@ -135,6 +135,14 @@ function setSettings(settings: {
 	}
 }
 
+function GetRemoteFromPath(path: string, parent: RemoteParent) {
+	const ParrentData = BazirRemotes.get(parent);
+	if (ParrentData === undefined) {
+		return;
+	}
+	return ParrentData.Children.find((child) => child.Path === path);
+}
+
 function GetRemoteType(remote: Remotes): RemoteNameType {
 	if (BazirRemote.Is(remote)) {
 		return "BazirRemote";
@@ -547,6 +555,10 @@ export class BazirRemote {
 		assert(typeIs(Path, "string"), `expects string, got ${type(Path)}`);
 		assert(Path.size() > 0, "path can't be empty");
 		assert(Path.size() < 256, "path can't be longer than 255 characters");
+		const Existing = GetRemoteFromPath(Path, Parent);
+		if (Existing) {
+			return Existing;
+		}
 		this._changeparent(Parent);
 		const mt = getmetatable(this) as LuaMetatable<BazirRemote>;
 		mt.__tostring = (remote) => `BazirRemote<${tostring(remote.Path)}>`;
@@ -837,7 +849,7 @@ export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRe
 			if (DeltaTime >= timeout) {
 				throw `failed to wait for ${key} on ${this.Path}`;
 			}
-			DeltaTime += task.wait();
+			DeltaTime += RunService.Heartbeat.Wait()[0];
 		}
 	}
 	add(key: string) {
