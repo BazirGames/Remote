@@ -155,6 +155,66 @@ function GetRemoteType(remote: Remotes): RemoteNameType {
 function IsRemote(remote: unknown): remote is BazirRemote | BazirRemoteContainer<[]> {
 	return BazirRemote.Is(remote) || BazirRemoteContainer.Is(remote);
 }
+
+function FindFirstChildByNameWhichIsA<T extends keyof Instances>(
+	instance: Instance,
+	child: string,
+	className: T,
+): Instances[T] | undefined {
+	assert(typeIs(instance, "Instance"), "expected Instance got %s".format(typeOf(instance)));
+	assert(typeIs(child, "string"), "expected string got %s".format(typeOf(child)));
+	assert(typeIs(className, "string"), "expected string got %s".format(typeOf(className)));
+
+	// first scan by name
+	const cachedFindByName = instance.FindFirstChild(child);
+	if (cachedFindByName && cachedFindByName.IsA(className)) {
+		return cachedFindByName;
+	}
+
+	// second scan by IsA
+	const cachedFindByClass = instance.FindFirstChildWhichIsA(className);
+	if (cachedFindByClass && cachedFindByClass.Name === child) {
+		return cachedFindByClass;
+	}
+
+	// slow loop find
+	for (const instanceChild of instance.GetChildren()) {
+		if (instanceChild.Name === child && instanceChild.IsA(className)) {
+			return instanceChild;
+		}
+	}
+}
+
+function WaitForChildByNameWhichIsA<T extends keyof Instances>(
+	instance: Instance,
+	child: string,
+	className: T,
+	timeout: number = math.huge,
+) {
+	assert(typeIs(instance, "Instance"), "expected Instance got %s".format(typeOf(instance)));
+	assert(typeIs(child, "string"), "expected string got %s".format(typeOf(child)));
+	assert(typeIs(className, "string"), "expected string got %s".format(typeOf(className)));
+	assert(typeIs(timeout, "number"), "expected number got %s".format(typeOf(timeout)));
+
+	let DeltaTime = 0;
+	let Warned = false;
+	let Child;
+	while (!Child) {
+		Child = FindFirstChildByNameWhichIsA(instance, child, className);
+		if (Child) {
+			return Child;
+		}
+		if (DeltaTime >= 5 && !Warned) {
+			Warned = true;
+			warn(debug.traceback(`Infinite yield possible waiting on ${instance.GetFullName()}`));
+		}
+		if (DeltaTime >= timeout) {
+			break;
+		}
+		DeltaTime += RunService.Heartbeat.Wait()[0];
+	}
+}
+
 export class BazirRemote {
 	public Janitor = new Janitor();
 	private Tags = new Map<string, unknown>();
@@ -333,7 +393,11 @@ export class BazirRemote {
 		if (this.RemoteEvent) {
 			return this.RemoteEvent;
 		}
-		let RemoteEvent = parent.FindFirstChild(this.Path) as typeof BazirRemote.prototype.RemoteEvent;
+		let RemoteEvent = FindFirstChildByNameWhichIsA(
+			parent,
+			this.Path,
+			"RemoteEvent",
+		) as typeof BazirRemote.prototype.RemoteEvent;
 		if (isServer && !RemoteEvent) {
 			RemoteEvent = this.Janitor.Add(new Instance("RemoteEvent"));
 			RemoteEvent.Name = this.Path;
@@ -350,10 +414,17 @@ export class BazirRemote {
 		if (this.RemoteEvent) {
 			return this.RemoteEvent;
 		}
-		let RemoteEvent = parent?.FindFirstChild(this.Path) as RemoteEvent | undefined;
-		if (!RemoteEvent) {
-			RemoteEvent = (
-				timeout <= 0 ? RemoteEvent : parent?.WaitForChild(this.Path, timeout)
+		let RemoteEvent = FindFirstChildByNameWhichIsA(
+			parent,
+			this.Path,
+			"RemoteEvent",
+		) as typeof BazirRemote.prototype.RemoteEvent;
+		if (RemoteEvent === undefined) {
+			RemoteEvent = WaitForChildByNameWhichIsA(
+				parent,
+				this.Path,
+				"RemoteEvent",
+				timeout,
 			) as typeof BazirRemote.prototype.RemoteEvent;
 		}
 		this.RemoteEvent = RemoteEvent;
