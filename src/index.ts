@@ -77,9 +77,9 @@ const enum Requests {
 	UpdateTag = "Request<UpdateTag>",
 }
 
-type Remotes = BazirRemote | BazirRemoteContainer<[]>;
-type RemoteParent = Remotes | Instance;
-type RemoteNameType = "BazirRemote" | "BazirRemoteContainer";
+export type Remotes = BazirRemote | BazirRemoteContainer<[]>;
+export type RemoteParent = Remotes | Instance;
+export type RemoteTypeName = "BazirRemote" | "BazirRemoteContainer";
 
 /*
 TODO
@@ -93,7 +93,7 @@ TODO
 - Add test
 - License
 - Document
-- Publish
+- Publish on Wally and rbxts
 */
 
 const YieldQueue: { [K: string]: thread | undefined } = {};
@@ -153,7 +153,7 @@ function GetRemoteFromPath(path: string, parent: RemoteParent) {
 	return ParrentData.Children.find((child) => child.Path === path);
 }
 
-function GetRemoteType(remote: Remotes): RemoteNameType {
+function GetRemoteType(remote: Remotes): RemoteTypeName {
 	if (BazirRemote.Is(remote)) {
 		return "BazirRemote";
 	} else if (BazirRemoteContainer.Is(remote)) {
@@ -225,6 +225,18 @@ function WaitForChildByNameWhichIsA<T extends keyof Instances>(
 	}
 }
 
+function assertPlayer(player: Player, message?: string): asserts player is Player {
+	assert(typeIs(player, "Instance") && player.IsA("Player"), message);
+}
+
+function assertPlayers(players: Array<Player>, message?: string): asserts players is Array<Player> {
+	assert(typeOf(players) === "table", "expected table got %s".format(typeOf(players)));
+	assert(
+		players.every((player) => typeIs(player, "Instance") && player.IsA("Player")),
+		message,
+	);
+}
+
 export class BazirRemote {
 	public Janitor = new Janitor();
 	private Tags = new Map<string, unknown>();
@@ -249,7 +261,7 @@ export class BazirRemote {
 	public Parent!: RemoteParent;
 	public InvokeClient<T>(player: Player, ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
-		assert(typeIs(player, "Instance") && player.IsA("Player"), "player must be a Player");
+		assertPlayer(player, "player must be a Player");
 		const uuid = HttpService.GenerateGUID(false);
 		const returnPromise = new Promise<T>((resolve, reject) => {
 			YieldQueue[uuid] = coroutine.running();
@@ -268,8 +280,13 @@ export class BazirRemote {
 		return returnPromise.timeout(Settings.Clienttimeout);
 	}
 	public InvokeClients<T>(players: Player[], ...args: unknown[]) {
-		assert(typeOf(players) === "table", "expected table got %s".format(typeOf(players)));
-		return Promise.all(players.map((player) => this.InvokeClient<T>(player, ...args)))
+		assert(isServer, "can only be called from the server");
+		assertPlayers(players, "players must be an array of Players");
+		return Promise.all<Promise<T>[]>(players.map((player) => this.InvokeClient<T>(player, ...args)));
+	}
+	public InvokeAllClients<T>(...args: unknown[]) {
+		assert(isServer, "can only be called from the server");
+		return this.InvokeClients<T>(Players.GetPlayers(), ...args);
 	}
 	public InvokeServer<T>(...args: unknown[]) {
 		assert(!isServer, "can only be called from the client");
@@ -321,41 +338,38 @@ export class BazirRemote {
 	}
 	public FireClient(player: Player, ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
-		assert(typeIs(player, "Instance") && player.IsA("Player"), "expected Player got %s".format(typeOf(player)));
+		assertPlayer(player, "expected Player got %s".format(typeOf(player)));
 		return this._request_client(undefined, Events.FireClient, Requests.FireClient, player, ...args);
 	}
 	public FireClients(players: Player[], ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
-		assert(typeOf(players) === "table", "expected table got %s".format(typeOf(players)));
-		players.forEach((player) => {
+		assertPlayers(players, "players must be an array of Players");
+		players.forEach(async (player) => {
 			this.FireClient(player, ...args);
 		});
 	}
-	public FireFilterClients(predicate: (value: Player, index: number, array: Player[]) => boolean, ...args: unknown[]) {
+	public FireFilterClients(
+		predicate: (value: Player, index: number, array: readonly Player[]) => boolean,
+		...args: unknown[]
+	) {
 		assert(isServer, "can only be called from the server");
-		return this.FireClients(Players.GetPlayers().filter(predicate), ...args)
+		assert(typeOf(predicate) === "function", "expected function got %s".format(typeOf(predicate)));
+		return this.FireClients(Players.GetPlayers().filter(predicate), ...args);
 	}
 	public FireOtherClients(ignoreclient: Player[], ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
-		return this.FireFilterClients(
-			(player) => !ignoreclient.includes(player),
-			...args,
-		);
+		return this.FireFilterClients((player) => !ignoreclient.includes(player), ...args);
 	}
 	public FireAllClientsWithinDistance(position: Vector3, distance: number, ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
 		assert(typeIs(position, "Vector3"), "expected Vector3 got %s".format(typeOf(position)));
 		assert(typeIs(distance, "number"), "expected number got %s".format(typeOf(distance)));
-		return this.FireFilterClients(
-			(player) => {
-				return (
-					player.Character &&
-					player.Character.PrimaryPart &&
-					player.Character.PrimaryPart.Position.sub(position).Magnitude <= distance
-				);
-			},
-			...args,
-		);
+		return this.FireFilterClients((player) => {
+			return (
+				player.Character?.PrimaryPart !== undefined &&
+				player.Character.PrimaryPart.Position.sub(position).Magnitude <= distance
+			);
+		}, ...args);
 	}
 	public FireOtherClientsWithinDistance(
 		ignoreclient: Player[],
@@ -367,17 +381,13 @@ export class BazirRemote {
 		assert(typeOf(ignoreclient) === "table", "expected table got %s".format(typeOf(ignoreclient)));
 		assert(typeIs(position, "Vector3"), "expected Vector3 got %s".format(typeOf(position)));
 		assert(typeIs(distance, "number"), "expected number got %s".format(typeOf(distance)));
-		return this.FireFilterClients(
-			(player) => {
-				return (
-					player.Character &&
-					player.Character.PrimaryPart &&
-					player.Character.PrimaryPart.Position.sub(position).Magnitude <= distance &&
-					!ignoreclient.includes(player)
-				);
-			},
-			...args,
-		);
+		return this.FireFilterClients((player) => {
+			return (
+				player.Character?.PrimaryPart !== undefined &&
+				player.Character.PrimaryPart.Position.sub(position).Magnitude <= distance &&
+				!ignoreclient.includes(player)
+			);
+		}, ...args);
 	}
 	public FireServer(...args: unknown[]) {
 		assert(!isServer, "can only be called from the client");
@@ -535,7 +545,6 @@ export class BazirRemote {
 		}
 		this.ChildAdded.Fire(child);
 	}
-
 	private _request_server<E extends Events, R extends Requests>(
 		uuid = HttpService.GenerateGUID(false),
 		Event: E,
@@ -554,7 +563,6 @@ export class BazirRemote {
 				throw "unknown event";
 		}
 	}
-
 	private _request_client<E extends Events, R extends Requests>(
 		uuid = HttpService.GenerateGUID(false),
 		Event: E,
@@ -567,11 +575,13 @@ export class BazirRemote {
 		assert(typeIs(Request, "string"), "expected Requests got %s".format(typeOf(Request)));
 		switch (Event) {
 			case Events.FireClient: {
-				assert(
-					typeIs(player, "Instance") && player.IsA("Player"),
-					"expected Player got %s".format(typeOf(player)),
+				assertPlayer(player as Player, "expected Player got %s".format(typeOf(player)));
+				this.RemoteEvent.FireClient(
+					player as Player,
+					Request,
+					uuid,
+					Compression.compress(HttpService.JSONEncode(args)),
 				);
-				this.RemoteEvent.FireClient(player, Request, uuid, Compression.compress(HttpService.JSONEncode(args)));
 				break;
 			}
 			case Events.FireAllClients: {
@@ -584,7 +594,7 @@ export class BazirRemote {
 				throw "unknown event";
 		}
 	}
-	private _removeChild(RemoteType: RemoteNameType, Path: string) {
+	private _removeChild(RemoteType: RemoteTypeName, Path: string) {
 		assert(!isServer, "can only be called from the client");
 		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
 		assert(typeIs(RemoteType, "string"), "expected string got %s".format(typeOf(RemoteType)));
@@ -596,7 +606,7 @@ export class BazirRemote {
 			CurrentData.Children.findIndex((child) => GetRemoteType(child) === RemoteType && child.Path === Path),
 		)?.Destroy();
 	}
-	private _createChild(RemoteType: RemoteNameType, Path: string) {
+	private _createChild(RemoteType: RemoteTypeName, Path: string) {
 		assert(!isServer, "can only be called from the client");
 		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
 		assert(typeIs(RemoteType, "string"), "expected string got %s".format(typeOf(RemoteType)));
@@ -827,7 +837,7 @@ export class BazirRemote {
 							const Child = args[0];
 							assert(typeIs(Child, "table"), `expect Child to be table but got ${typeOf(Child)}`);
 							const { RemoteType, Path } = Child as {
-								RemoteType: RemoteNameType;
+								RemoteType: RemoteTypeName;
 								Path: string;
 							};
 							assert(
@@ -844,7 +854,7 @@ export class BazirRemote {
 							const Child = args[0];
 							assert(typeIs(Child, "table"), `expect Child to be table but got ${typeOf(Child)}`);
 							const { RemoteType, Path } = Child as {
-								RemoteType: RemoteNameType;
+								RemoteType: RemoteTypeName;
 								Path: string;
 							};
 							assert(
