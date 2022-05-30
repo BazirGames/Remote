@@ -44,6 +44,7 @@ const Log = {
 const Settings = {
 	Servertimeout: 30,
 	Clienttimeout: 30,
+	Traffic: 1,
 	AutoCleanup: true,
 };
 
@@ -80,11 +81,20 @@ type Remotes = BazirRemote | BazirRemoteContainer<[]>;
 type RemoteParent = Remotes | Instance;
 type RemoteNameType = "BazirRemote" | "BazirRemoteContainer";
 
-//TODO
-/* type RequestTypes =
-	| [Events.FireServer, Requests, string, ...unknown[]]
-	| [Events.FireClient, Player, Requests, string, ...unknown[]]
-	| [Events.FireAllClients, Requests, string, ...unknown[]]; */
+/*
+TODO
+- Add @client and @server label
+- Remove Import
+- Queue system
+- Middleware
+- Log system
+- RemoteAccess = ["Event", "Function"]
+ RequireAccess("Event" | "Function")
+- Add test
+- License
+- Document
+- Publish
+*/
 
 const YieldQueue: { [K: string]: thread | undefined } = {};
 const BazirRemotes = new Map<
@@ -117,7 +127,7 @@ function numberToStorageSpace(number: number): string {
 
 export const version = 1;
 
-function setSetting<T extends keyof typeof Settings>(setting: T, value: typeof Settings[T]) {
+export function setSetting<T extends keyof typeof Settings>(setting: T, value: typeof Settings[T]) {
 	assert(Settings[setting] !== undefined, `${setting} isn't a setting`);
 	assert(
 		typeIs(value, typeOf(Settings[setting])),
@@ -126,7 +136,7 @@ function setSetting<T extends keyof typeof Settings>(setting: T, value: typeof S
 	Settings[setting] = value;
 }
 
-function setSettings(settings: {
+export function setSettings(settings: {
 	[K in keyof typeof Settings]?: typeof Settings[K];
 }) {
 	assert(typeIs(settings, "table"), "expected table got %s".format(typeOf(settings)));
@@ -152,7 +162,7 @@ function GetRemoteType(remote: Remotes): RemoteNameType {
 	throw "Unknown remote type";
 }
 
-function IsRemote(remote: unknown): remote is BazirRemote | BazirRemoteContainer<[]> {
+export function IsRemote(remote: unknown): remote is BazirRemote | BazirRemoteContainer<[]> {
 	return BazirRemote.Is(remote) || BazirRemoteContainer.Is(remote);
 }
 
@@ -257,6 +267,10 @@ export class BazirRemote {
 		});
 		return returnPromise.timeout(Settings.Clienttimeout);
 	}
+	public InvokeClients<T>(players: Player[], ...args: unknown[]) {
+		assert(typeOf(players) === "table", "expected table got %s".format(typeOf(players)));
+		return Promise.all(players.map((player) => this.InvokeClient<T>(player, ...args)))
+	}
 	public InvokeServer<T>(...args: unknown[]) {
 		assert(!isServer, "can only be called from the client");
 		const uuid = HttpService.GenerateGUID(false);
@@ -312,14 +326,19 @@ export class BazirRemote {
 	}
 	public FireClients(players: Player[], ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
+		assert(typeOf(players) === "table", "expected table got %s".format(typeOf(players)));
 		players.forEach((player) => {
 			this.FireClient(player, ...args);
 		});
 	}
+	public FireFilterClients(predicate: (value: Player, index: number, array: Player[]) => boolean, ...args: unknown[]) {
+		assert(isServer, "can only be called from the server");
+		return this.FireClients(Players.GetPlayers().filter(predicate), ...args)
+	}
 	public FireOtherClients(ignoreclient: Player[], ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
-		return this.FireClients(
-			Players.GetPlayers().filter((player) => !ignoreclient.includes(player)),
+		return this.FireFilterClients(
+			(player) => !ignoreclient.includes(player),
 			...args,
 		);
 	}
@@ -327,14 +346,14 @@ export class BazirRemote {
 		assert(isServer, "can only be called from the server");
 		assert(typeIs(position, "Vector3"), "expected Vector3 got %s".format(typeOf(position)));
 		assert(typeIs(distance, "number"), "expected number got %s".format(typeOf(distance)));
-		return this.FireClients(
-			Players.GetPlayers().filter((player) => {
+		return this.FireFilterClients(
+			(player) => {
 				return (
 					player.Character &&
 					player.Character.PrimaryPart &&
 					player.Character.PrimaryPart.Position.sub(position).Magnitude <= distance
 				);
-			}),
+			},
 			...args,
 		);
 	}
@@ -348,15 +367,15 @@ export class BazirRemote {
 		assert(typeOf(ignoreclient) === "table", "expected table got %s".format(typeOf(ignoreclient)));
 		assert(typeIs(position, "Vector3"), "expected Vector3 got %s".format(typeOf(position)));
 		assert(typeIs(distance, "number"), "expected number got %s".format(typeOf(distance)));
-		return this.FireClients(
-			Players.GetPlayers().filter((player) => {
+		return this.FireFilterClients(
+			(player) => {
 				return (
 					player.Character &&
 					player.Character.PrimaryPart &&
 					player.Character.PrimaryPart.Position.sub(position).Magnitude <= distance &&
 					!ignoreclient.includes(player)
 				);
-			}),
+			},
 			...args,
 		);
 	}
@@ -897,7 +916,7 @@ export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRe
 	public static Is(object: unknown): object is typeof BazirRemoteContainer.prototype {
 		return typeIs(object, "table") && getmetatable(object) === BazirRemoteContainer;
 	}
-	private Remotes: Map<string, BazirRemote> = new Map();
+	private Remotes = new Map<string, BazirRemote>();
 	get(key: string) {
 		assert(typeOf(key) === "string", "key must be string");
 		return this.Remotes.get(key);
@@ -949,175 +968,6 @@ export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRe
 	}
 }
 
-const enum NetworkSettings {
-	Name = "_Network_",
-	Event = "_Event_",
-	Function = "_Function_",
-}
-type ServerEventsFunction = (player: Player, ...args: unknown[]) => unknown;
-type ClientEventsFunction = (...args: unknown[]) => unknown;
-export class ServerNetwork {
-	private RemoteContainer: BazirRemoteContainer;
-	Invoke<T>(key: string, player: Player, ...args: unknown[]): Promise<T> {
-		assert(typeOf(key) === "string", "key must be string");
-		return this.RemoteContainer.get(`${NetworkSettings.Function}`)!.InvokeClient<T>(player, `${key}`, ...args);
-	}
-	Fire(key: string, player: Player | Player[], ...args: unknown[]) {
-		assert(typeOf(key) === "string", "key must be string");
-		if (typeIs(player, "table")) {
-			return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireClients(
-				player as Player[],
-				`${key}`,
-				...args,
-			);
-		}
-		assert(typeOf(player) === "Instance", "player must be Instance");
-		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireClient(player, `${key}`, ...args);
-	}
-	FireAll(key: string, ...args: unknown[]) {
-		assert(typeOf(key) === "string", "key must be string");
-		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireAllClients(`${key}`, ...args);
-	}
-	FireOther(key: string, ignoreclient: Player[], ...args: unknown[]) {
-		assert(typeOf(key) === "string", "key must be string");
-		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireOtherClients(ignoreclient, `${key}`, ...args);
-	}
-	FireAllWithinDistance(key: string, position: Vector3, distance: number, ...args: unknown[]) {
-		assert(typeOf(key) === "string", "key must be string");
-		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireAllClientsWithinDistance(
-			position,
-			distance,
-			`${key}`,
-			...args,
-		);
-	}
-	FireOtherWithinDistance(
-		key: string,
-		ignoreclient: Player[],
-		position: Vector3,
-		distance: number,
-		...args: unknown[]
-	) {
-		assert(typeOf(key) === "string", "key must be string");
-		return this.RemoteContainer.get(`${NetworkSettings.Event}`)!.FireOtherClientsWithinDistance(
-			ignoreclient,
-			position,
-			distance,
-			`${key}`,
-			...args,
-		);
-	}
-	BindFunctions(functions: { [k: string]: ServerEventsFunction }) {
-		assert(typeOf(functions) === "table", "functions must be table");
-		const Remote = this.RemoteContainer.get(`${NetworkSettings.Function}`)!;
-		for (const [key, value] of pairs(functions)) {
-			new BazirRemote(`${key}`, Remote).OnServerInvoke = value;
-		}
-		return this;
-	}
-	BindEvents(events: { [k: string]: ServerEventsFunction }) {
-		assert(typeOf(events) === "table", "events must be table");
-		const Remote = this.RemoteContainer.get(`${NetworkSettings.Event}`)!;
-		for (const [key, value] of pairs(events)) {
-			new BazirRemote(`${key}`, Remote).OnServerEvent.Connect(value);
-		}
-		return this;
-	}
-	constructor(parent: RemoteParent = script, name = NetworkSettings.Name) {
-		assert(isServer, "Cannot create server network on client");
-		this.RemoteContainer = new BazirRemoteContainer(
-			name,
-			[`${NetworkSettings.Function}`, `${NetworkSettings.Event}`],
-			parent,
-		);
-	}
-}
-export class ClientNetwork {
-	private RemoteContainer: BazirRemoteContainer;
-	private Networks = {
-		[NetworkSettings.Function]: new Map<string, BazirRemote>(),
-		[NetworkSettings.Event]: new Map<string, BazirRemote>(),
-	};
-	private Comunications = {
-		[NetworkSettings.Function]: new Map<string, ClientEventsFunction>(),
-		[NetworkSettings.Event]: new Map<string, Array<ClientEventsFunction>>(),
-	};
-	public static Is(object: unknown): object is typeof ClientNetwork.prototype {
-		return typeIs(object, "table") && getmetatable(object) === ClientNetwork;
-	}
-	Invoke<T>(key: string, ...args: unknown[]): Promise<T> | undefined {
-		assert(typeOf(key) === "string", "key must be string");
-		return this.Networks[NetworkSettings.Function].get(key)?.InvokeServer<T>(...args);
-	}
-	Fire(key: string, ...args: unknown[]) {
-		assert(typeOf(key) === "string", "key must be string");
-		return this.Networks[NetworkSettings.Event].get(key)?.FireServer(...args);
-	}
-	BindFunctions(functions: { [k: string]: ClientEventsFunction }) {
-		assert(typeOf(functions) === "table", "functions must be table");
-		for (const [key, value] of pairs(functions)) {
-			this.Comunications[NetworkSettings.Function].set(`${key}`, value);
-		}
-		return this;
-	}
-	BindEvents(events: { [k: string]: ClientEventsFunction }) {
-		assert(typeOf(events) === "table", "events must be table");
-		for (const [key, value] of pairs(events)) {
-			(
-				this.Comunications[NetworkSettings.Event].get(`${key}`) ??
-				this.Comunications[NetworkSettings.Event].set(`${key}`, []).get(`${key}`)
-			)?.push(value);
-		}
-		return this;
-	}
-	constructor(parent: RemoteParent = script, name = NetworkSettings.Name) {
-		assert(!isServer, "Cannot create client network on server");
-		this.RemoteContainer = new BazirRemoteContainer(name, [], parent);
-
-		const EventRemote = this.RemoteContainer.waitfor(`${NetworkSettings.Event}`, Settings.Clienttimeout);
-		assert(EventRemote, "remote event not found");
-		const FunctionRemote = this.RemoteContainer.waitfor(`${NetworkSettings.Function}`, Settings.Clienttimeout);
-		assert(FunctionRemote, "remote function not found");
-
-		EventRemote.ChildAdded.Connect((child) => {
-			this.Networks[NetworkSettings.Event].set(child.Path, child);
-		});
-		EventRemote.ChildRemoved.Connect((child) => {
-			this.Networks[NetworkSettings.Event].delete(child.Path);
-		});
-		EventRemote?.GetChildren().forEach((child) => {
-			this.Networks[NetworkSettings.Event].set(child.Path, child);
-		});
-		EventRemote?.OnClientEvent.Connect((key, ...args) => {
-			assert(typeIs(key, "string"), "Key must be string");
-			const funcs = this.Comunications[NetworkSettings.Event].get(key);
-			if (funcs) {
-				funcs.forEach(
-					async((func) => {
-						func(...args);
-					}),
-				);
-			}
-		});
-
-		FunctionRemote.ChildAdded.Connect((child) => {
-			this.Networks[NetworkSettings.Function].set(child.Path, child);
-		});
-		FunctionRemote.ChildRemoved.Connect((child) => {
-			this.Networks[NetworkSettings.Function].delete(child.Path);
-		});
-		FunctionRemote?.GetChildren().forEach((child) => {
-			this.Networks[NetworkSettings.Function].set(child.Path, child);
-		});
-		FunctionRemote!.OnClientInvoke = (key, ...args) => {
-			assert(typeIs(key, "string"), "Key must be string");
-			const func = this.Comunications[NetworkSettings.Function].get(key);
-			assert(func !== undefined, "Cannot find function");
-			return func(...args);
-		};
-	}
-}
-
 function CleanupQueue() {
 	for (const [_, Thread] of pairs(YieldQueue)) {
 		if (coroutine.status(Thread) === "suspended") {
@@ -1156,5 +1006,3 @@ if (isServer) {
 		Cleanup();
 	});
 }
-
-export default { setSetting, setSettings };
