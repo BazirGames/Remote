@@ -1,52 +1,28 @@
 import { Janitor } from "@rbxts/janitor";
-import Signal from "./Signal";
-import Compression from "./Compression";
-/* import type SignalType from "./Signal";
-import type CompressionType from "./Compression";
-import type PromiseType from "./GetPromiseLibrary";
+class Signal<ConnectedFunctionSignature extends (...args: any) => any = (...args: any) => any> {
+	public static Is(object: unknown): object is Signal {
+		return typeIs(object, "table") && getmetatable(object) === Signal;
+	}
 
-const Promise = require(script.FindFirstChild("GetPromiseLibrary") as ModuleScript) as typeof PromiseType;
-const Signal = require(script.FindFirstChild("Signal") as ModuleScript) as typeof SignalType;
-const Compression = require(script.FindFirstChild("Compression") as ModuleScript) as typeof CompressionType; */
-
-function async<T extends Callback>(f: T): T {
-	// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-	// @ts-ignore
-	return Promise.promisify(f);
+	private Bindable = new Instance("BindableEvent");
+	public Connect(callback: ConnectedFunctionSignature): RBXScriptConnection {
+		return this.Bindable.Event.Connect((c: () => LuaTuple<Parameters<ConnectedFunctionSignature>>) =>
+			callback(c()),
+		);
+	}
+	/** @hidden */
+	public Fire(...args: Parameters<ConnectedFunctionSignature>) {
+		return this.Bindable.Fire(() => args as LuaTuple<[Parameters<ConnectedFunctionSignature>]>);
+	}
+	public Wait(): LuaTuple<Parameters<ConnectedFunctionSignature>> {
+		return (this.Bindable.Event.Wait() as unknown as () => unknown)() as LuaTuple<
+			Parameters<ConnectedFunctionSignature>
+		>;
+	}
+	public Destroy() {
+		this.Bindable.Destroy();
+	}
 }
-
-const LogSettings = {
-	LogEnabled: false,
-	LogAdvancedEnabled: false,
-};
-
-const Log = {
-	Info: async((message: string, ...optionalParams: unknown[]) => {
-		if (LogSettings.LogEnabled) {
-			print(message, optionalParams);
-		}
-	}),
-	Error: async((message: string, ...optionalParams: unknown[]) => {
-		if (LogSettings.LogEnabled) {
-			print(message, optionalParams);
-		}
-	}),
-	Debug: async((message: string, ...optionalParams: unknown[]) => {
-		if (LogSettings.LogAdvancedEnabled) {
-			print(message, optionalParams);
-		}
-	}),
-	Warn: async((message: string, ...optionalParams: unknown[]) => {
-		warn(message, optionalParams);
-	}),
-};
-
-const Settings = {
-	Servertimeout: 30,
-	Clienttimeout: 30,
-	Traffic: 1,
-	AutoCleanup: true,
-};
 
 const Players = game.GetService("Players");
 const RunService = game.GetService("RunService");
@@ -77,9 +53,34 @@ const enum Requests {
 	UpdateTag = "Request<UpdateTag>",
 }
 
+const enum RemoteEnum {
+	Name = "BazirRemote",
+}
+
 export type Remotes = BazirRemote | BazirRemoteContainer<[]>;
 export type RemoteParent = Remotes | Instance;
 export type RemoteTypeName = "BazirRemote" | "BazirRemoteContainer";
+
+const Settings = {
+	Servertimeout: 30,
+	Clienttimeout: 30,
+	Traffic: 1 / 60, //SOON
+	AutoCleanup: true,
+	LogEnabled: false,
+};
+
+const Log = {
+	Info: (message: string, ...optionalParams: unknown[]) => {
+		if (Settings.LogEnabled) {
+			print(RemoteEnum.Name, message, optionalParams);
+		}
+	},
+	Warn: (message: string, ...optionalParams: unknown[]) => {
+		if (Settings.LogEnabled) {
+			warn(RemoteEnum.Name, message, optionalParams);
+		}
+	},
+};
 
 /*
 TODO
@@ -238,7 +239,7 @@ function assertPlayers(players: Array<Player>, message?: string): asserts player
 }
 
 export class BazirRemote {
-	public Janitor = new Janitor();
+	private Janitor = new Janitor();
 	private Tags = new Map<string, unknown>();
 	public static Is(object: unknown): object is typeof BazirRemote.prototype {
 		return typeIs(object, "table") && getmetatable(object) === BazirRemote;
@@ -344,9 +345,11 @@ export class BazirRemote {
 	public FireClients(players: Player[], ...args: unknown[]) {
 		assert(isServer, "can only be called from the server");
 		assertPlayers(players, "players must be an array of Players");
-		players.forEach(async (player) => {
-			this.FireClient(player, ...args);
-		});
+		players.forEach(
+			coroutine.wrap((player) => {
+				this.FireClient(player, ...args);
+			}),
+		);
 	}
 	public FireFilterClients(
 		predicate: (value: Player, index: number, array: readonly Player[]) => boolean,
@@ -556,7 +559,7 @@ export class BazirRemote {
 		assert(typeIs(Request, "string"), "expected Requests got %s".format(typeOf(Request)));
 		switch (Event) {
 			case Events.FireServer: {
-				this.RemoteEvent.FireServer(Request, uuid, Compression.compress(HttpService.JSONEncode(args)));
+				this.RemoteEvent.FireServer(Request, uuid, args);
 				break;
 			}
 			default:
@@ -576,12 +579,7 @@ export class BazirRemote {
 		switch (Event) {
 			case Events.FireClient: {
 				assertPlayer(player as Player, "expected Player got %s".format(typeOf(player)));
-				this.RemoteEvent.FireClient(
-					player as Player,
-					Request,
-					uuid,
-					Compression.compress(HttpService.JSONEncode(args)),
-				);
+				this.RemoteEvent.FireClient(player as Player, Request, uuid, args);
 				break;
 			}
 			case Events.FireAllClients: {
@@ -606,23 +604,38 @@ export class BazirRemote {
 			CurrentData.Children.findIndex((child) => GetRemoteType(child) === RemoteType && child.Path === Path),
 		)?.Destroy();
 	}
-	private _createChild(RemoteType: RemoteTypeName, Path: string) {
+	private _createChild(RemoteType: RemoteTypeName, Path: string): Remotes {
 		assert(!isServer, "can only be called from the client");
 		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
 		assert(typeIs(RemoteType, "string"), "expected string got %s".format(typeOf(RemoteType)));
 		switch (RemoteType) {
 			case "BazirRemote": {
-				new BazirRemote(`${Path}`, this);
-				break;
+				return new BazirRemote(`${Path}`, this);
 			}
 			case "BazirRemoteContainer": {
-				new BazirRemoteContainer(`${Path}`, [], this);
-				break;
+				return new BazirRemoteContainer(`${Path}`, [], this);
 			}
 			default:
-				Log.Warn("unknown remote type %s".format(RemoteType));
-				break;
+				throw "unknown remote type";
 		}
+	}
+	private _getChild(RemoteType: RemoteTypeName, Path: string): Remotes | undefined {
+		assert(!isServer, "can only be called from the client");
+		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
+		assert(typeIs(RemoteType, "string"), "expected string got %s".format(typeOf(RemoteType)));
+		return BazirRemotes.get(this)?.Children.find(
+			(child) => GetRemoteType(child) === RemoteType && child.Path === Path,
+		);
+	}
+	private _getorcreateChild(RemoteType: RemoteTypeName, Path: string): Remotes {
+		assert(!isServer, "can only be called from the client");
+		assert(typeIs(Path, "string"), "expected string got %s".format(typeOf(Path)));
+		assert(typeIs(RemoteType, "string"), "expected string got %s".format(typeOf(RemoteType)));
+		const Child = this._getChild(RemoteType, Path);
+		if (Child) {
+			return Child;
+		}
+		return this._createChild(RemoteType, Path);
 	}
 	public Destroy() {
 		const CurrentData = BazirRemotes.get(this);
@@ -704,17 +717,19 @@ export class BazirRemote {
 						return;
 					}
 					const result = opcall(() => {
-						return HttpService.JSONDecode(Compression.decompress(data)) as unknown[];
+						return data as unknown[];
 					});
 					const args = result.success ? result.value : [];
-					Log.Info(
-						`[Server] - [${player.Name}] > ${numberToStorageSpace(
-							`${Request}${uuid}${HttpService.JSONEncode(args)}`.size(),
-						)} - ${Request} - ${uuid} => ${(args as (keyof CheckablePrimitives)[])
-							.map((arg) => type(arg))
-							.join(", ")}`,
-						args,
-					);
+					task.spawn(() => {
+						Log.Info(
+							`[Server] - [${player.Name}] > ${numberToStorageSpace(
+								`${Request}${uuid}${HttpService.JSONEncode(args)}`.size(),
+							)} - ${Request} - ${uuid} => ${(args as (keyof CheckablePrimitives)[])
+								.map((arg) => type(arg))
+								.join(", ")}`,
+							args,
+						);
+					});
 					switch (Request) {
 						case Requests.InvokeServer: {
 							this._request_client(
@@ -789,17 +804,19 @@ export class BazirRemote {
 					assert(typeIs(Request, "string"), "expected string got %s".format(typeOf(Request)));
 					assert(typeIs(uuid, "string"), "expected string got %s".format(typeOf(uuid)));
 					const result = opcall(() => {
-						return HttpService.JSONDecode(Compression.decompress(data)) as unknown[] as unknown[];
+						return data as unknown[];
 					});
 					const args = result.success ? result.value : [];
-					Log.Info(
-						`[Client] - [localplayer] > ${numberToStorageSpace(
-							`${Request}${uuid}${HttpService.JSONEncode(args)}`.size(),
-						)} - ${Request} - ${uuid} => ${(args as (keyof CheckablePrimitives)[])
-							.map((arg) => type(arg))
-							.join(", ")}`,
-						args,
-					);
+					task.spawn(() => {
+						Log.Info(
+							`[Client] - [localplayer] > ${numberToStorageSpace(
+								`${Request}${uuid}${HttpService.JSONEncode(args)}`.size(),
+							)} - ${Request} - ${uuid} => ${(args as (keyof CheckablePrimitives)[])
+								.map((arg) => type(arg))
+								.join(", ")}`,
+							args,
+						);
+					});
 					switch (Request) {
 						case Requests.InvokeServer: {
 							const Thread = YieldQueue[uuid];
@@ -908,7 +925,7 @@ export class BazirRemote {
 					const YieldPromises = new Array<Promise<unknown>>();
 					this.Tags = Tags;
 					Childrens.forEach(({ RemoteType, Path }) => {
-						YieldPromises.push(Promise.try(() => this._createChild(RemoteType, Path)));
+						YieldPromises.push(Promise.try(() => this._getorcreateChild(RemoteType, Path)));
 					});
 					Promise.all(YieldPromises).await();
 				})
@@ -947,7 +964,8 @@ export class BazirRemoteContainer<T extends string[] = string[]> extends BazirRe
 				warn(debug.traceback(`Infinite Yield Possible on waitfor ${key} on ${this.Path}`));
 			}
 			if (DeltaTime >= timeout) {
-				throw `failed to wait for ${key} on ${this.Path}`;
+				//throw `failed to wait for ${key} on ${this.Path}`;
+				break;
 			}
 			DeltaTime += RunService.Heartbeat.Wait()[0];
 		}
@@ -991,9 +1009,7 @@ function CleanupRemotes() {
 		current.Children.forEach((child) => {
 			child?.Destroy();
 		});
-		/* current.Children.clear(); */
 	});
-	/* BazirRemotes.clear(); */
 }
 
 function Cleanup() {
